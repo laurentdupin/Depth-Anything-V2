@@ -80,6 +80,7 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(conv_transpose_nonoverlap_half)
     dav2_compile_shader(bilinear_align_true)
     dav2_compile_shader(relu)
+    dav2_compile_shader(preprocess_rgba)
 endif()
 
 add_library(depth_anything_v2 SHARED
@@ -114,6 +115,7 @@ if(DAV2_WITH_VULKAN)
         src/dpt.cpp
         src/operators.cpp
         src/vulkan.cpp
+        src/gpu_preprocess.cpp
         src/vulkan_executor.cpp
         ${DAV2_SHADER_HEADERS}
     )
@@ -143,6 +145,7 @@ if(DAV2_BUILD_TOOLS)
             src/model.cpp
             src/operators.cpp
             src/vulkan.cpp
+            src/gpu_preprocess.cpp
             ${DAV2_SHADER_HEADERS}
         )
         target_compile_features(dav2_encoder_probe PRIVATE cxx_std_17)
@@ -176,6 +179,7 @@ if(DAV2_BUILD_TESTS)
             src/model.cpp
             src/operators.cpp
             src/vulkan.cpp
+            src/gpu_preprocess.cpp
             ${DAV2_SHADER_HEADERS}
         )
         target_compile_features(dav2_vulkan_smoke PRIVATE cxx_std_17)
@@ -186,5 +190,46 @@ if(DAV2_BUILD_TESTS)
         )
         target_link_libraries(dav2_vulkan_smoke PRIVATE Vulkan::Vulkan)
         add_test(NAME dav2_vulkan_smoke COMMAND dav2_vulkan_smoke)
+
+        if(WIN32)
+            add_executable(
+                dav2_model_metadata_tests
+                tests/model_metadata.cpp
+                src/model.cpp)
+            target_compile_features(
+                dav2_model_metadata_tests PRIVATE cxx_std_17)
+            target_include_directories(
+                dav2_model_metadata_tests PRIVATE
+                    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+            add_test(
+                NAME dav2_model_metadata_tests
+                COMMAND dav2_model_metadata_tests)
+
+            add_executable(dav2_vulkan_external_smoke
+                tests/vulkan_external_smoke.cpp
+                src/gpu_preprocess.cpp
+                src/image.cpp
+                src/vulkan.cpp
+                ${DAV2_SHADER_HEADERS}
+            )
+            target_compile_features(
+                dav2_vulkan_external_smoke PRIVATE cxx_std_17)
+            target_include_directories(
+                dav2_vulkan_external_smoke PRIVATE
+                    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+                    "${DAV2_GENERATED_DIR}"
+            )
+            target_link_libraries(
+                dav2_vulkan_external_smoke PRIVATE
+                    Vulkan::Vulkan d3d12 dxgi)
+            add_test(
+                NAME dav2_vulkan_external_smoke
+                COMMAND dav2_vulkan_external_smoke)
+            set_tests_properties(
+                dav2_vulkan_external_smoke
+                PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
     endif()
 endif()

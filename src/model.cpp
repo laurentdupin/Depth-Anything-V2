@@ -13,6 +13,9 @@ constexpr std::uint32_t format_version = 1;
 constexpr std::uint32_t endian_tag = 0x01020304;
 constexpr std::uint32_t dtype_float32 = 1;
 constexpr std::uint64_t alignment = 64;
+constexpr char metadata_magic[8] = {
+    'D', 'A', 'V', '2', 'M', 'E', 'T', 'A'};
+constexpr std::uint32_t metadata_version = 1;
 
 #pragma pack(push, 1)
 struct FileHeader {
@@ -40,10 +43,23 @@ struct TensorRecord {
     std::uint32_t flags;
     std::uint64_t reserved;
 };
+
+struct DerivationMetadata {
+    char magic[8];
+    std::uint32_t version;
+    std::uint32_t bytes;
+    std::uint32_t model_format_version;
+    std::uint32_t encoder;
+    std::uint32_t flags;
+    std::uint32_t reserved;
+    std::uint8_t canonical_sha256[32];
+    char converter[64];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(FileHeader) == 64);
 static_assert(sizeof(TensorRecord) == 192);
+static_assert(sizeof(DerivationMetadata) == 128);
 
 bool range_valid(std::uint64_t offset, std::uint64_t bytes, std::uint64_t limit) {
     return offset <= limit && bytes <= limit - offset;
@@ -140,6 +156,49 @@ ModelFile::ModelFile(
                 header.directory_offset + header.directory_bytes ||
             header.data_offset > size_) {
             throw std::runtime_error("invalid DAV2 tensor directory");
+        }
+        if (header.reserved != 0) {
+            if (header.reserved !=
+                    header.directory_offset +
+                        header.directory_bytes ||
+                !range_valid(
+                    header.reserved,
+                    sizeof(DerivationMetadata),
+                    header.data_offset)) {
+                throw std::runtime_error(
+                    "invalid DAV2 derivation metadata bounds");
+            }
+            const auto& metadata =
+                *reinterpret_cast<const DerivationMetadata*>(
+                    view_ + header.reserved);
+            if (std::memcmp(
+                    metadata.magic,
+                    metadata_magic,
+                    sizeof(metadata_magic)) != 0 ||
+                metadata.version != metadata_version ||
+                metadata.bytes != sizeof(DerivationMetadata) ||
+                metadata.model_format_version !=
+                    format_version ||
+                metadata.encoder != header.encoder ||
+                metadata.flags != 0 ||
+                metadata.reserved != 0 ||
+                std::memchr(
+                    metadata.converter,
+                    '\0',
+                    sizeof(metadata.converter)) == nullptr) {
+                throw std::runtime_error(
+                    "invalid DAV2 derivation metadata");
+            }
+            derivation_.present = true;
+            std::memcpy(
+                derivation_.canonical_sha256.data(),
+                metadata.canonical_sha256,
+                derivation_.canonical_sha256.size());
+            derivation_.converter = metadata.converter;
+            derivation_.format_version =
+                metadata.model_format_version;
+            derivation_.encoder =
+                static_cast<dav2_encoder>(metadata.encoder);
         }
 
         tensors_.reserve(header.tensor_count);

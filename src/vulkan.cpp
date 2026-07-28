@@ -14,6 +14,19 @@ void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
 }
 
+#if defined(_WIN32)
+bool has_extension(
+    const std::vector<VkExtensionProperties>& extensions,
+    const char* name) {
+    return std::any_of(
+        extensions.begin(),
+        extensions.end(),
+        [name](const VkExtensionProperties& extension) {
+            return std::strcmp(extension.extensionName, name) == 0;
+        });
+}
+#endif
+
 }  // namespace
 
 void VulkanContext::check(VkResult result, const char* operation) {
@@ -22,6 +35,26 @@ void VulkanContext::check(VkResult result, const char* operation) {
             std::string(operation) + " failed with Vulkan error " +
             std::to_string(static_cast<int>(result)));
     }
+}
+
+VulkanSemaphore::VulkanSemaphore(VulkanSemaphore&& other) noexcept {
+    *this = std::move(other);
+}
+
+VulkanSemaphore& VulkanSemaphore::operator=(
+    VulkanSemaphore&& other) noexcept {
+    if (this != &other) {
+        if (owner_) owner_->destroy(*this);
+        owner_ = std::exchange(other.owner_, nullptr);
+        semaphore_ = std::exchange(
+            other.semaphore_, VK_NULL_HANDLE);
+        value_ = std::exchange(other.value_, 0);
+    }
+    return *this;
+}
+
+VulkanSemaphore::~VulkanSemaphore() {
+    if (owner_) owner_->destroy(*this);
 }
 
 VulkanSubmission::VulkanSubmission(VulkanSubmission&& other) noexcept {
@@ -148,8 +181,84 @@ VulkanContext::VulkanContext(std::uint32_t device_index) try {
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
     device_name_ = properties.deviceName;
+#if defined(_WIN32)
+    VkPhysicalDeviceIDProperties identity{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 properties2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &identity,
+    };
+    vkGetPhysicalDeviceProperties2(physical_device_, &properties2);
+    if (identity.deviceLUIDValid) {
+        static_assert(VK_LUID_SIZE == sizeof(adapter_luid_));
+        std::memcpy(
+            &adapter_luid_, identity.deviceLUID, VK_LUID_SIZE);
+    }
+#endif
     vkGetPhysicalDeviceMemoryProperties(
         physical_device_, &memory_properties_);
+
+    std::uint32_t extension_count = 0;
+    check(
+        vkEnumerateDeviceExtensionProperties(
+            physical_device_, nullptr, &extension_count, nullptr),
+        "vkEnumerateDeviceExtensionProperties");
+    std::vector<VkExtensionProperties> extensions(extension_count);
+    check(
+        vkEnumerateDeviceExtensionProperties(
+            physical_device_, nullptr, &extension_count, extensions.data()),
+        "vkEnumerateDeviceExtensionProperties");
+    std::vector<const char*> enabled_extensions;
+#if defined(_WIN32)
+    const bool has_external_memory_win32 = has_extension(
+        extensions, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    const bool has_external_semaphore_win32 = has_extension(
+        extensions, VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+    if (has_external_memory_win32) {
+        const VkPhysicalDeviceExternalBufferInfo external_buffer{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO,
+            nullptr,
+            0,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+        };
+        VkExternalBufferProperties external_properties{
+            VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES,
+        };
+        vkGetPhysicalDeviceExternalBufferProperties(
+            physical_device_,
+            &external_buffer,
+            &external_properties);
+        external_capabilities_.d3d12_resource_import =
+            (external_properties.externalMemoryProperties
+                 .externalMemoryFeatures &
+             VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+        enabled_extensions.push_back(
+            VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    }
+    if (has_external_semaphore_win32) {
+        const VkPhysicalDeviceExternalSemaphoreInfo external_semaphore{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+            nullptr,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
+        };
+        VkExternalSemaphoreProperties semaphore_properties{
+            VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
+        vkGetPhysicalDeviceExternalSemaphoreProperties(
+            physical_device_,
+            &external_semaphore,
+            &semaphore_properties);
+        external_capabilities_.d3d12_fence_import =
+            (semaphore_properties.externalSemaphoreFeatures &
+             VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0;
+        enabled_extensions.push_back(
+            VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+    }
+#else
+    (void)extensions;
+#endif
 
     std::uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(
@@ -185,13 +294,32 @@ VulkanContext::VulkanContext(std::uint32_t device_index) try {
         &queue_info,
         0,
         nullptr,
-        0,
-        nullptr,
+        static_cast<std::uint32_t>(enabled_extensions.size()),
+        enabled_extensions.data(),
         nullptr,
     };
     check(
         vkCreateDevice(physical_device_, &device_info, nullptr, &device_),
         "vkCreateDevice");
+#if defined(_WIN32)
+    get_memory_win32_handle_properties_ =
+        reinterpret_cast<
+            PFN_vkGetMemoryWin32HandlePropertiesKHR>(
+            vkGetDeviceProcAddr(
+                device_,
+                "vkGetMemoryWin32HandlePropertiesKHR"));
+    import_semaphore_win32_handle_ =
+        reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
+            vkGetDeviceProcAddr(
+                device_,
+                "vkImportSemaphoreWin32HandleKHR"));
+    external_capabilities_.d3d12_resource_import =
+        external_capabilities_.d3d12_resource_import &&
+        get_memory_win32_handle_properties_ != nullptr;
+    external_capabilities_.d3d12_fence_import =
+        external_capabilities_.d3d12_fence_import &&
+        import_semaphore_win32_handle_ != nullptr;
+#endif
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
     const VkCommandPoolCreateInfo command_pool_info{
@@ -358,6 +486,168 @@ VulkanBuffer VulkanContext::create_device_buffer(VkDeviceSize bytes) {
     return result;
 }
 
+#if defined(_WIN32)
+VulkanBuffer VulkanContext::import_d3d12_buffer(
+    void* shared_handle,
+    VkDeviceSize bytes) {
+    if (!external_capabilities_.d3d12_resource_import) {
+        throw std::runtime_error(
+            "Vulkan device cannot import D3D12 resources");
+    }
+    if (shared_handle == nullptr || bytes == 0) {
+        throw std::invalid_argument(
+            "invalid D3D12 shared buffer");
+    }
+    HANDLE duplicated = nullptr;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            static_cast<HANDLE>(shared_handle),
+            GetCurrentProcess(),
+            &duplicated,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS)) {
+        throw std::runtime_error(
+            "failed to duplicate D3D12 shared handle");
+    }
+
+    VulkanBuffer result;
+    result.owner_ = this;
+    result.size_ = bytes;
+    const VkExternalMemoryBufferCreateInfo external_buffer{
+        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        nullptr,
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+    };
+    const VkBufferCreateInfo buffer_info{
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        &external_buffer,
+        0,
+        bytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+    };
+    try {
+        check(
+            vkCreateBuffer(
+                device_, &buffer_info, nullptr, &result.buffer_),
+            "vkCreateBuffer(D3D12 import)");
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(
+            device_, result.buffer_, &requirements);
+        VkMemoryWin32HandlePropertiesKHR handle_properties{
+            VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR,
+        };
+        check(
+            get_memory_win32_handle_properties_(
+                device_,
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+                duplicated,
+                &handle_properties),
+            "vkGetMemoryWin32HandlePropertiesKHR");
+        const VkMemoryDedicatedAllocateInfo dedicated{
+            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            nullptr,
+            VK_NULL_HANDLE,
+            result.buffer_,
+        };
+        const VkImportMemoryWin32HandleInfoKHR import{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+            &dedicated,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+            duplicated,
+            nullptr,
+        };
+        const VkMemoryAllocateInfo allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            &import,
+            requirements.size,
+            find_memory_type(
+                requirements.memoryTypeBits &
+                    handle_properties.memoryTypeBits,
+                0),
+        };
+        check(
+            vkAllocateMemory(
+                device_, &allocation, nullptr, &result.memory_),
+            "vkAllocateMemory(D3D12 import)");
+        CloseHandle(duplicated);
+        duplicated = nullptr;
+        check(
+            vkBindBufferMemory(
+                device_, result.buffer_, result.memory_, 0),
+            "vkBindBufferMemory(D3D12 import)");
+        return result;
+    } catch (...) {
+        if (duplicated != nullptr) CloseHandle(duplicated);
+        throw;
+    }
+}
+
+VulkanSemaphore VulkanContext::import_d3d12_fence(
+    void* shared_handle,
+    std::uint64_t value) {
+    if (!external_capabilities_.d3d12_fence_import) {
+        throw std::runtime_error(
+            "Vulkan device cannot import D3D12 fences");
+    }
+    if (shared_handle == nullptr) {
+        throw std::invalid_argument(
+            "invalid D3D12 shared fence");
+    }
+    HANDLE duplicated = nullptr;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            static_cast<HANDLE>(shared_handle),
+            GetCurrentProcess(),
+            &duplicated,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS)) {
+        throw std::runtime_error(
+            "failed to duplicate D3D12 fence handle");
+    }
+    VulkanSemaphore result;
+    result.owner_ = this;
+    result.value_ = value;
+    const VkSemaphoreCreateInfo semaphore_info{
+        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        nullptr,
+        0,
+    };
+    try {
+        check(
+            vkCreateSemaphore(
+                device_,
+                &semaphore_info,
+                nullptr,
+                &result.semaphore_),
+            "vkCreateSemaphore(D3D12 import)");
+        const VkImportSemaphoreWin32HandleInfoKHR import{
+            VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR,
+            nullptr,
+            result.semaphore_,
+            0,
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
+            duplicated,
+            nullptr,
+        };
+        check(
+            import_semaphore_win32_handle_(device_, &import),
+            "vkImportSemaphoreWin32HandleKHR");
+        CloseHandle(duplicated);
+        return result;
+    } catch (...) {
+        CloseHandle(duplicated);
+        throw;
+    }
+}
+#endif
+
 VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
     auto best = host_buffer_pool_.end();
     for (auto candidate = host_buffer_pool_.begin();
@@ -426,13 +716,21 @@ VkCommandBuffer VulkanContext::begin_commands() {
     return command;
 }
 
-void VulkanContext::end_commands(VkCommandBuffer command) {
-    VulkanSubmission submission = submit_commands(command);
+void VulkanContext::end_commands(
+    VkCommandBuffer command,
+    const VulkanSemaphore* wait) {
+    VulkanSubmission submission = submit_commands(command, wait);
     submission.wait();
 }
 
 VulkanSubmission VulkanContext::submit_commands(
-    VkCommandBuffer command) {
+    VkCommandBuffer command,
+    const VulkanSemaphore* wait) {
+    if (wait != nullptr && wait->owner_ != this) {
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+        throw std::invalid_argument(
+            "foreign Vulkan wait semaphore");
+    }
     try {
         check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
     } catch (...) {
@@ -453,12 +751,32 @@ VulkanSubmission VulkanContext::submit_commands(
         vkFreeCommandBuffers(device_, command_pool_, 1, &command);
         throw;
     }
-    const VkSubmitInfo submit{
-        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    const VkPipelineStageFlags wait_stage =
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+#if defined(_WIN32)
+    const std::uint64_t wait_value =
+        wait != nullptr ? wait->value_ : 0;
+    const VkD3D12FenceSubmitInfoKHR d3d12_values{
+        VK_STRUCTURE_TYPE_D3D12_FENCE_SUBMIT_INFO_KHR,
         nullptr,
+        wait != nullptr ? 1u : 0u,
+        wait != nullptr ? &wait_value : nullptr,
         0,
         nullptr,
+    };
+#endif
+    const VkSemaphore wait_handle =
+        wait != nullptr ? wait->semaphore_ : VK_NULL_HANDLE;
+    const VkSubmitInfo submit{
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+#if defined(_WIN32)
+        wait != nullptr ? &d3d12_values : nullptr,
+#else
         nullptr,
+#endif
+        wait != nullptr ? 1u : 0u,
+        wait != nullptr ? &wait_handle : nullptr,
+        wait != nullptr ? &wait_stage : nullptr,
         1,
         &command,
         0,
@@ -681,7 +999,8 @@ void VulkanContext::dispatch(
     std::uint32_t push_constant_bytes,
     std::uint32_t group_x,
     std::uint32_t group_y,
-    std::uint32_t group_z) {
+    std::uint32_t group_z,
+    const VulkanSemaphore* wait) {
     if (pipeline.owner_ != this ||
         buffers.size() != pipeline.descriptor_types_.size() ||
         push_constant_bytes != pipeline.push_constant_bytes_ ||
@@ -740,6 +1059,11 @@ void VulkanContext::dispatch(
         nullptr);
 
     const bool batched = batch_command_ != VK_NULL_HANDLE;
+    if (batched && wait != nullptr) {
+        pipeline.cached_descriptor_sets_.push_back(descriptor_set);
+        throw std::invalid_argument(
+            "external wait is not supported inside a Vulkan batch");
+    }
     VkCommandBuffer command =
         batched ? batch_command_ : begin_commands();
     if (batched && batch_has_dispatch_) {
@@ -787,7 +1111,7 @@ void VulkanContext::dispatch(
         batch_descriptor_sets_.push_back(
             {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
     } else {
-        end_commands(command);
+        end_commands(command, wait);
         pipeline.cached_descriptor_sets_.push_back(descriptor_set);
     }
 }
@@ -841,6 +1165,16 @@ void VulkanContext::destroy(VulkanSubmission& submission) noexcept {
     submission.owner_ = nullptr;
     submission.command_ = VK_NULL_HANDLE;
     submission.fence_ = VK_NULL_HANDLE;
+}
+
+void VulkanContext::destroy(VulkanSemaphore& semaphore) noexcept {
+    if (semaphore.semaphore_ != VK_NULL_HANDLE) {
+        vkDestroySemaphore(
+            device_, semaphore.semaphore_, nullptr);
+    }
+    semaphore.owner_ = nullptr;
+    semaphore.semaphore_ = VK_NULL_HANDLE;
+    semaphore.value_ = 0;
 }
 
 void VulkanContext::recycle_or_destroy(

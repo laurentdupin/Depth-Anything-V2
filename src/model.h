@@ -26,6 +26,14 @@ struct TensorView {
     std::uint32_t crc32 = 0;
 };
 
+struct ModelDerivation {
+    bool present = false;
+    std::array<std::uint8_t, 32> canonical_sha256{};
+    std::string converter;
+    std::uint32_t format_version = 0;
+    dav2_encoder encoder = DAV2_ENCODER_VITS;
+};
+
 class ModelFile {
 public:
     ModelFile(const std::string& path_utf8, dav2_encoder expected_encoder);
@@ -39,6 +47,9 @@ public:
     const std::vector<std::string_view>& tensor_names() const {
         return tensor_names_;
     }
+    const ModelDerivation& derivation() const {
+        return derivation_;
+    }
 
 private:
     void close() noexcept;
@@ -51,6 +62,7 @@ private:
     std::uint64_t size_ = 0;
     std::unordered_map<std::string_view, TensorView> tensors_;
     std::vector<std::string_view> tensor_names_;
+    ModelDerivation derivation_;
 };
 
 }  // namespace dav2

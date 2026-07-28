@@ -1,5 +1,16 @@
 #pragma once
 
+#if defined(_WIN32)
+#  if !defined(WIN32_LEAN_AND_MEAN)
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  if !defined(NOMINMAX)
+#    define NOMINMAX
+#  endif
+#  if !defined(VK_USE_PLATFORM_WIN32_KHR)
+#    define VK_USE_PLATFORM_WIN32_KHR
+#  endif
+#endif
 #include <vulkan/vulkan.h>
 
 #include <cstddef>
@@ -11,6 +22,27 @@
 namespace dav2 {
 
 class VulkanContext;
+
+struct VulkanExternalCapabilities {
+    bool d3d12_resource_import = false;
+    bool d3d12_fence_import = false;
+};
+
+class VulkanSemaphore {
+public:
+    VulkanSemaphore() = default;
+    VulkanSemaphore(VulkanSemaphore&& other) noexcept;
+    VulkanSemaphore& operator=(VulkanSemaphore&& other) noexcept;
+    VulkanSemaphore(const VulkanSemaphore&) = delete;
+    VulkanSemaphore& operator=(const VulkanSemaphore&) = delete;
+    ~VulkanSemaphore();
+
+private:
+    friend class VulkanContext;
+    VulkanContext* owner_ = nullptr;
+    VkSemaphore semaphore_ = VK_NULL_HANDLE;
+    std::uint64_t value_ = 0;
+};
 
 class VulkanSubmission {
 public:
@@ -81,6 +113,20 @@ public:
     ~VulkanContext();
 
     const std::string& device_name() const { return device_name_; }
+    const VulkanExternalCapabilities& external_capabilities() const {
+        return external_capabilities_;
+    }
+#if defined(_WIN32)
+    std::uint64_t adapter_luid() const { return adapter_luid_; }
+    // Input handles are borrowed. DAV2 duplicates them before importing, so
+    // the caller may close its handle after this function returns.
+    VulkanBuffer import_d3d12_buffer(
+        void* shared_handle,
+        VkDeviceSize bytes);
+    VulkanSemaphore import_d3d12_fence(
+        void* shared_handle,
+        std::uint64_t value);
+#endif
 
     VulkanBuffer create_device_buffer(VkDeviceSize bytes);
     VulkanBuffer create_host_buffer(VkDeviceSize bytes);
@@ -113,7 +159,8 @@ public:
         std::uint32_t push_constant_bytes,
         std::uint32_t group_x,
         std::uint32_t group_y = 1,
-        std::uint32_t group_z = 1);
+        std::uint32_t group_z = 1,
+        const VulkanSemaphore* wait = nullptr);
 
     template <typename Function>
     void batch(Function&& function) {
@@ -132,6 +179,7 @@ public:
     }
 
 private:
+    friend class VulkanSemaphore;
     friend class VulkanSubmission;
     friend class VulkanBuffer;
     friend class VulkanPipeline;
@@ -149,13 +197,18 @@ private:
         VkBuffer destination,
         VkDeviceSize bytes);
     VkCommandBuffer begin_commands();
-    VulkanSubmission submit_commands(VkCommandBuffer command_buffer);
-    void end_commands(VkCommandBuffer command_buffer);
+    VulkanSubmission submit_commands(
+        VkCommandBuffer command_buffer,
+        const VulkanSemaphore* wait = nullptr);
+    void end_commands(
+        VkCommandBuffer command_buffer,
+        const VulkanSemaphore* wait = nullptr);
     void begin_batch();
     void end_batch();
     void cancel_batch() noexcept;
     void release_batch_resources() noexcept;
     void recycle_or_destroy(DeferredBuffer buffer) noexcept;
+    void destroy(VulkanSemaphore& semaphore) noexcept;
     void destroy(VulkanSubmission& submission) noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
@@ -189,6 +242,14 @@ private:
     std::vector<DeferredBuffer> host_buffer_pool_;
     VkDeviceSize pooled_device_bytes_ = 0;
     VkDeviceSize pooled_host_bytes_ = 0;
+    VulkanExternalCapabilities external_capabilities_{};
+#if defined(_WIN32)
+    std::uint64_t adapter_luid_ = 0;
+    PFN_vkGetMemoryWin32HandlePropertiesKHR
+        get_memory_win32_handle_properties_ = nullptr;
+    PFN_vkImportSemaphoreWin32HandleKHR
+        import_semaphore_win32_handle_ = nullptr;
+#endif
     std::string device_name_;
 };
 

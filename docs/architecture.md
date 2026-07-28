@@ -102,6 +102,8 @@ dictionary to a bounded, memory-mappable file:
 - fixed magic, format version, endian tag, and encoder identifier;
 - a sorted tensor directory with rank, dimensions, offset, byte count, and
   CRC-32 for every tensor;
+- optional fixed derivation metadata containing the canonical checkpoint
+  SHA-256, converter identity, DAV2 format version, and encoder;
 - 64-byte-aligned contiguous FP32 tensor payloads.
 
 The loader rejects truncated files, integer overflows, overlapping or
@@ -114,6 +116,34 @@ uploaded directly to Vulkan device memory during context creation. Precision
 autotuning initially needs FP32 and packed-FP16 candidates for eligible
 weights; immediately after selection, the unused copy is destroyed instead of
 remaining in the Vulkan allocation pool.
+
+New exports use a cache identity of:
+
+`canonical SHA-256 + converter ID + DAV2 format version + encoder`
+
+The metadata is inserted between the tensor directory and aligned tensor data.
+The original format version remains readable: older files have a zero metadata
+offset, and older readers ignore the new offset and padding. The official
+PyTorch checkpoint remains the canonical artifact; `.dav2` is a derived,
+content-addressed representation rather than a second model identity.
+
+## External GPU resource foundation
+
+The internal Windows Vulkan layer probes external D3D12 resource and fence
+import support on the selected physical device. When both capabilities are
+available it can:
+
+- duplicate and import a shared D3D12 buffer as dedicated Vulkan memory;
+- duplicate and import a shared D3D12 fence as a Vulkan semaphore with an
+  explicit wait value;
+- resize BGRA8 or RGBA8 buffers with bicubic filtering and normalize directly
+  into device-local planar RGB FP32.
+
+These primitives are not yet part of the public C ABI and must not be
+advertised as an end-to-end GPU inference capability. The remaining gate is to
+retain the imported input and intermediate graph resources through an
+asynchronous inference submission, export the device-resident depth result and
+completion synchronization, and tie both to an explicit output lease.
 
 ## Native ABI
 
