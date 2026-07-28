@@ -42,6 +42,40 @@ different GPU architectures or driver shader compilers. Compatibility mode
 always uses FP32, preserves the reference operation order, and never enables
 reduced-precision storage or arithmetic.
 
+### PyTorch CPU reference
+
+PyTorch CPU is the authoritative cross-backend reference because its Vulkan
+backend is experimental. The 20 photographs in `assets/examples` were tested
+at the default input size of 518 using stock PyTorch 2.13 CPU on an AMD Ryzen
+7 7800X3D and the DLL on an AMD Radeon RX 9070. The comparison covered
+52,755,986 source-resolution output pixels per model.
+
+| Encoder | Mean absolute error | RMSE | Maximum absolute error | Relative L1 error |
+|---|---:|---:|---:|---:|
+| ViT-S | 0.002086 | 0.003207 | 0.099400 | 0.1086% |
+| ViT-B | 0.003654 | 0.005631 | 0.144027 | 0.0945% |
+| ViT-L | 0.089627 | 0.142580 | 6.431381 | 0.0633% |
+
+The output ranges across the suite were 0–10.24 for ViT-S, 0–20.63 for ViT-B,
+and 0–816.75 for ViT-L. CPU and GPU outputs are therefore numerically close
+but not bitwise identical. The differences come from backend-specific
+floating-point reduction and transcendental implementations and accumulate
+through the transformer blocks.
+
+Average complete image inference times were:
+
+| Encoder | Native DLL | PyTorch CPU | Native speedup |
+|---|---:|---:|---:|
+| ViT-S | 0.358 s | 0.726 s | 2.03x |
+| ViT-B | 0.818 s | 2.330 s | 2.85x |
+| ViT-L | 2.864 s | 6.464 s | 2.26x |
+
+`tools/compare_assets.py` reproduces the test and writes per-image CSV results
+and native depth previews. The DA-2K benchmark poster and project teaser are
+not part of this photo suite; the poster's extreme aspect ratio creates a
+pathological 6,000-plus-token CPU attention workload at the default input
+size.
+
 ## Runtime implementation strategy
 
 The DLL owns its complete inference stack:
