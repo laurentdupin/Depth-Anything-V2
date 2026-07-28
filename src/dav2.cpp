@@ -77,6 +77,8 @@ dav2_status protect(Function&& function) {
         return fail(DAV2_STATUS_OUT_OF_MEMORY, "out of memory");
     } catch (const std::invalid_argument& error) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, error.what());
+    } catch (const dav2::GpuSlotsExhausted& error) {
+        return fail(DAV2_STATUS_INVALID_STATE, error.what());
     } catch (const std::exception& error) {
         return fail(DAV2_STATUS_INTERNAL_ERROR, error.what());
     } catch (...) {

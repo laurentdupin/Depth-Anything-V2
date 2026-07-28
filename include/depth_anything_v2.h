@@ -153,7 +153,9 @@ typedef struct dav2_gpu_job_status {
  * Handles in this descriptor are borrowed and remain valid until the matching
  * output lease is released. The resource is a D3D12 shared buffer containing
  * row-major float32 depth. Consumers must wait for ready_fence_value on the
- * shared D3D12 fence before accessing it.
+ * shared D3D12 fence before accessing it. If a consumer transitions the
+ * resource, it must return it to D3D12_RESOURCE_STATE_COMMON before releasing
+ * the lease so DAV2 may safely reuse the slot.
  */
 typedef struct dav2_d3d12_output_descriptor {
     uint32_t struct_size;
@@ -175,6 +177,8 @@ typedef struct dav2_d3d12_output_descriptor {
 /*
  * The leased resource is a shared D3D12 TEXTURE2D with
  * DXGI_FORMAT_R32_FLOAT. Both handles are borrowed for the lease lifetime.
+ * A consumer must return the texture to D3D12_RESOURCE_STATE_COMMON before
+ * releasing the lease if it performs an explicit state transition.
  */
 typedef struct dav2_d3d12_texture_output_descriptor {
     uint32_t struct_size;

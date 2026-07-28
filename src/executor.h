@@ -4,9 +4,17 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 namespace dav2 {
+
+class GpuSlotsExhausted final : public std::runtime_error {
+public:
+    GpuSlotsExhausted()
+        : std::runtime_error(
+              "all DAV2 GPU output slots are retained") {}
+};
 
 struct GpuCapabilities {
     std::uint64_t flags = 0;

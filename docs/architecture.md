@@ -168,8 +168,16 @@ buffer or texture output descriptors contain borrowed shared D3D12
 resource/fence handles which remain valid through the explicit output lease.
 Releasing a job handle does not invalidate a live lease. Cancellation does not
 attempt unsafe command-buffer preemption: it makes the output unavailable and
-retained resources are reclaimed after the submitted fence completes. One live
-GPU job is currently allowed per context.
+retained resources are reclaimed after the submitted fence completes. Each
+context owns three reusable output slots. A slot's shared resource and fence
+handles remain stable across same-kind, same-dimension reuse, while its fence
+value increases for each submission. A live job or output lease retains only
+its slot; a fourth submission returns `DAV2_STATUS_INVALID_STATE` so callers
+can apply a latest-frame drop policy. A free slot is recreated only when its
+output kind or dimensions change. The lightweight Vulkan memory/image import
+is scoped to each job so no Vulkan layout state crosses a consumer lease, while
+the physical D3D12 allocation and exported handles remain stable. Submissions
+share one Vulkan queue and may serialize there without `vkQueueWaitIdle`.
 
 Capability flags are returned only when the complete input, graph, output, and
 synchronization path is available. `dav2_probe_gpu_capabilities` performs the

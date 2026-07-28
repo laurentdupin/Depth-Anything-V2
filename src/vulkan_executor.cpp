@@ -8,6 +8,7 @@
 #include "operators.h"
 #include "vulkan.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -29,10 +30,7 @@ namespace {
 
 #if defined(_WIN32)
 using Microsoft::WRL::ComPtr;
-
-struct GpuSlot {
-    std::atomic<bool> occupied{false};
-};
+constexpr std::uint32_t kGpuSlotCount = 3;
 
 void check_hresult(HRESULT result, const char* operation) {
     if (FAILED(result)) {
@@ -95,11 +93,34 @@ struct SharedD3D12Output {
               std::exchange(other.resource_handle, nullptr)),
           fence_handle(
               std::exchange(other.fence_handle, nullptr)) {}
+    SharedD3D12Output& operator=(
+        SharedD3D12Output&& other) noexcept {
+        if (this != &other) {
+            if (resource_handle != nullptr) CloseHandle(resource_handle);
+            if (fence_handle != nullptr) CloseHandle(fence_handle);
+            resource = std::move(other.resource);
+            fence = std::move(other.fence);
+            resource_handle =
+                std::exchange(other.resource_handle, nullptr);
+            fence_handle =
+                std::exchange(other.fence_handle, nullptr);
+        }
+        return *this;
+    }
 
     ~SharedD3D12Output() {
         if (resource_handle != nullptr) CloseHandle(resource_handle);
         if (fence_handle != nullptr) CloseHandle(fence_handle);
     }
+};
+
+struct GpuSlot {
+    std::atomic<bool> occupied{false};
+    SharedD3D12Output shared;
+    GpuOutputKind kind = GpuOutputKind::buffer;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint64_t fence_value = 0;
 };
 
 SharedD3D12Output create_shared_output(
@@ -217,6 +238,96 @@ SharedD3D12Output create_shared_texture_output(
     return result;
 }
 
+std::shared_ptr<GpuSlot> acquire_gpu_slot(
+    const std::array<
+        std::shared_ptr<GpuSlot>, kGpuSlotCount>& slots,
+    std::atomic<std::uint32_t>& next_slot) {
+    const std::uint32_t first =
+        next_slot.fetch_add(1, std::memory_order_relaxed) %
+        kGpuSlotCount;
+    for (std::uint32_t offset = 0;
+         offset < kGpuSlotCount;
+         ++offset) {
+        const std::shared_ptr<GpuSlot>& slot =
+            slots[(first + offset) % kGpuSlotCount];
+        bool expected = false;
+        if (slot->occupied.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            return slot;
+        }
+    }
+    throw GpuSlotsExhausted();
+}
+
+VulkanBuffer prepare_buffer_output(
+    GpuSlot& slot,
+    ID3D12Device* device,
+    VulkanContext& context,
+    std::uint32_t width,
+    std::uint32_t height) {
+    if (slot.shared.resource != nullptr &&
+        slot.kind == GpuOutputKind::buffer &&
+        slot.width == width &&
+        slot.height == height) {
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(width) *
+            height * sizeof(float);
+        return context.import_d3d12_buffer(
+            slot.shared.resource_handle, bytes);
+    }
+    slot.shared = SharedD3D12Output{};
+    slot.width = 0;
+    slot.height = 0;
+    slot.fence_value = 0;
+    const std::uint64_t bytes =
+        static_cast<std::uint64_t>(width) *
+        height * sizeof(float);
+    slot.shared = create_shared_output(device, bytes);
+    VulkanBuffer output = context.import_d3d12_buffer(
+        slot.shared.resource_handle, bytes);
+    slot.kind = GpuOutputKind::buffer;
+    slot.width = width;
+    slot.height = height;
+    return output;
+}
+
+VulkanImage prepare_texture_output(
+    GpuSlot& slot,
+    ID3D12Device* device,
+    VulkanContext& context,
+    std::uint32_t width,
+    std::uint32_t height) {
+    if (slot.shared.resource != nullptr &&
+        slot.kind == GpuOutputKind::texture &&
+        slot.width == width &&
+        slot.height == height) {
+        return context.import_d3d12_image(
+            slot.shared.resource_handle,
+            width,
+            height,
+            VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    }
+    slot.shared = SharedD3D12Output{};
+    slot.width = 0;
+    slot.height = 0;
+    slot.fence_value = 0;
+    slot.shared =
+        create_shared_texture_output(device, width, height);
+    VulkanImage output = context.import_d3d12_image(
+        slot.shared.resource_handle,
+        width,
+        height,
+        VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    slot.kind = GpuOutputKind::texture;
+    slot.width = width;
+    slot.height = height;
+    return output;
+}
+
 void validate_shared_texture(
     ID3D12Device* device,
     std::uintptr_t handle,
@@ -265,7 +376,7 @@ GpuCapabilities d3d12_capabilities(
             DAV2_GPU_CAP_NO_HOST_PIXEL_STAGING |
             DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING;
         result.adapter_luid = context.adapter_luid();
-        result.maximum_in_flight_jobs = 1;
+        result.maximum_in_flight_jobs = kGpuSlotCount;
         if (external.d3d12_bgra8_sampled_image_import &&
             external.d3d12_rgba8_sampled_image_import &&
             external.d3d12_r32_storage_image_import) {
@@ -281,25 +392,23 @@ class VulkanGpuJob final : public GpuJob {
 public:
     VulkanGpuJob(
         std::shared_ptr<GpuSlot> slot,
-        SharedD3D12Output shared,
-        GpuOutputKind kind,
         VulkanBuffer output_buffer,
         VulkanImage input_image,
         VulkanImage output_image,
         VulkanSubmission submission,
         std::uint32_t width,
         std::uint32_t height,
+        std::uint64_t fence_value,
         std::uint64_t source_frame_id,
         std::uint64_t timestamp_ns)
         : slot_(std::move(slot)),
-          shared_(std::move(shared)),
-          kind_(kind),
           output_buffer_(std::move(output_buffer)),
           input_image_(std::move(input_image)),
           output_image_(std::move(output_image)),
           submission_(std::move(submission)),
           width_(width),
           height_(height),
+          fence_value_(fence_value),
           source_frame_id_(source_frame_id),
           timestamp_ns_(timestamp_ns) {}
 
@@ -308,6 +417,12 @@ public:
             submission_.wait();
         } catch (...) {
         }
+        // Release per-submission descriptors and the imported input before
+        // another job can claim and record work against this output slot.
+        submission_ = VulkanSubmission{};
+        output_image_ = VulkanImage{};
+        input_image_ = VulkanImage{};
+        output_buffer_ = VulkanBuffer{};
         slot_->occupied.store(false, std::memory_order_release);
     }
 
@@ -329,7 +444,7 @@ public:
             throw std::runtime_error("GPU job was cancelled");
         }
         GpuOutput result;
-        result.kind = kind_;
+        result.kind = slot_->kind;
         result.width = width_;
         result.height = height_;
         result.row_stride_bytes = width_ * sizeof(float);
@@ -337,11 +452,11 @@ public:
             static_cast<std::uint64_t>(result.row_stride_bytes) * height_;
         result.shared_resource_handle =
             reinterpret_cast<std::uintptr_t>(
-                shared_.resource_handle);
+                slot_->shared.resource_handle);
         result.ready_fence_handle =
             reinterpret_cast<std::uintptr_t>(
-                shared_.fence_handle);
-        result.ready_fence_value = 1;
+                slot_->shared.fence_handle);
+        result.ready_fence_value = fence_value_;
         result.source_frame_id = source_frame_id_;
         result.timestamp_ns = timestamp_ns_;
         return result;
@@ -349,16 +464,14 @@ public:
 
 private:
     std::shared_ptr<GpuSlot> slot_;
-    // D3D12 ownership outlives every Vulkan import. Destruction is in reverse
-    // order: submission wait, Vulkan imports, then shared D3D12 objects.
-    SharedD3D12Output shared_;
-    GpuOutputKind kind_ = GpuOutputKind::buffer;
+    // Per-job Vulkan imports outlive the submission that references them.
     VulkanBuffer output_buffer_;
     VulkanImage input_image_;
     VulkanImage output_image_;
     VulkanSubmission submission_;
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
+    std::uint64_t fence_value_ = 0;
     std::uint64_t source_frame_id_ = 0;
     std::uint64_t timestamp_ns_ = 0;
     std::atomic<bool> cancelled_{false};
@@ -379,9 +492,12 @@ public:
           encoder_(encoder, context_, weights_, operators_),
           dpt_(encoder, context_, weights_, operators_)
 #if defined(_WIN32)
-          , gpu_slot_(std::make_shared<GpuSlot>()),
-          d3d12_device_(
-              matching_d3d12_device(context_.adapter_luid()))
+          , d3d12_device_(
+              matching_d3d12_device(context_.adapter_luid())),
+          gpu_slots_{
+              std::make_shared<GpuSlot>(),
+              std::make_shared<GpuSlot>(),
+              std::make_shared<GpuSlot>()}
 #endif
           {}
 
@@ -471,32 +587,27 @@ public:
             throw std::invalid_argument(
                 "D3D12 GPU input dimensions exceed the resource");
         }
-        bool expected = false;
-        if (!gpu_slot_->occupied.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            throw std::runtime_error(
-                "DAV2 supports one live GPU job per context");
-        }
+        std::shared_ptr<GpuSlot> slot =
+            acquire_gpu_slot(gpu_slots_, next_gpu_slot_);
         try {
             const ImageShape shape = network_shape(
                 static_cast<int>(request.width),
                 static_cast<int>(request.height),
                 request.input_size);
-            const std::uint64_t output_bytes =
-                static_cast<std::uint64_t>(request.width) *
-                request.height * sizeof(float);
-            SharedD3D12Output shared =
-                create_shared_output(
-                    d3d12_device_.Get(), output_bytes);
-            VulkanBuffer output =
-                context_.import_d3d12_buffer(
-                    shared.resource_handle, output_bytes);
+            VulkanBuffer output = prepare_buffer_output(
+                *slot,
+                d3d12_device_.Get(),
+                context_,
+                request.width,
+                request.height);
+            const std::uint64_t signal_value =
+                ++slot->fence_value;
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(
                     request.wait_fence_handle),
                 request.wait_fence_value);
             VulkanSemaphore signal = context_.import_d3d12_fence(
-                shared.fence_handle, 1);
+                slot->shared.fence_handle, signal_value);
             VulkanSubmission submission = context_.batch_async(
                 std::move(wait),
                 std::move(signal),
@@ -514,7 +625,8 @@ public:
                     context_.acquire_external_buffer(
                         source, VK_ACCESS_SHADER_READ_BIT);
                     context_.acquire_external_buffer(
-                        output, VK_ACCESS_SHADER_WRITE_BIT);
+                        output,
+                        VK_ACCESS_SHADER_WRITE_BIT);
                     preprocessor_.run(
                         image,
                         source,
@@ -544,22 +656,22 @@ public:
                     context_.release_external_buffer(
                         source, VK_ACCESS_SHADER_READ_BIT);
                     context_.release_external_buffer(
-                        output, VK_ACCESS_SHADER_WRITE_BIT);
+                        output,
+                        VK_ACCESS_SHADER_WRITE_BIT);
                 });
             return std::make_unique<VulkanGpuJob>(
-                gpu_slot_,
-                std::move(shared),
-                GpuOutputKind::buffer,
+                slot,
                 std::move(output),
                 VulkanImage{},
                 VulkanImage{},
                 std::move(submission),
                 request.width,
                 request.height,
+                signal_value,
                 request.source_frame_id,
                 request.timestamp_ns);
         } catch (...) {
-            gpu_slot_->occupied.store(
+            slot->occupied.store(
                 false, std::memory_order_release);
             throw;
         }
@@ -601,22 +713,21 @@ public:
             request.width,
             request.height,
             request.pixel_format);
-        bool expected = false;
-        if (!gpu_slot_->occupied.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            throw std::runtime_error(
-                "DAV2 supports one live GPU job per context");
-        }
+        std::shared_ptr<GpuSlot> slot =
+            acquire_gpu_slot(gpu_slots_, next_gpu_slot_);
         try {
             const ImageShape shape = network_shape(
                 static_cast<int>(request.width),
                 static_cast<int>(request.height),
                 request.input_size);
-            SharedD3D12Output shared =
-                create_shared_texture_output(
-                    d3d12_device_.Get(),
-                    request.width,
-                    request.height);
+            VulkanImage output = prepare_texture_output(
+                *slot,
+                d3d12_device_.Get(),
+                context_,
+                request.width,
+                request.height);
+            const std::uint64_t signal_value =
+                ++slot->fence_value;
             const VkFormat input_format =
                 request.pixel_format == DAV2_GPU_PIXEL_BGRA8
                 ? VK_FORMAT_B8G8R8A8_UNORM
@@ -629,19 +740,12 @@ public:
                 input_format,
                 VK_IMAGE_USAGE_SAMPLED_BIT |
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-            VulkanImage output = context_.import_d3d12_image(
-                shared.resource_handle,
-                request.width,
-                request.height,
-                VK_FORMAT_R32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT |
-                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(
                     request.wait_fence_handle),
                 request.wait_fence_value);
             VulkanSemaphore signal = context_.import_d3d12_fence(
-                shared.fence_handle, 1);
+                slot->shared.fence_handle, signal_value);
             VulkanSubmission submission = context_.batch_async(
                 std::move(wait),
                 std::move(signal),
@@ -687,19 +791,18 @@ public:
                         VK_ACCESS_SHADER_WRITE_BIT);
                 });
             return std::make_unique<VulkanGpuJob>(
-                gpu_slot_,
-                std::move(shared),
-                GpuOutputKind::texture,
+                slot,
                 VulkanBuffer{},
                 std::move(input),
                 std::move(output),
                 std::move(submission),
                 request.width,
                 request.height,
+                signal_value,
                 request.source_frame_id,
                 request.timestamp_ns);
         } catch (...) {
-            gpu_slot_->occupied.store(
+            slot->occupied.store(
                 false, std::memory_order_release);
             throw;
         }
@@ -721,8 +824,10 @@ private:
     DinoEncoder encoder_;
     DptHead dpt_;
 #if defined(_WIN32)
-    std::shared_ptr<GpuSlot> gpu_slot_;
     ComPtr<ID3D12Device> d3d12_device_;
+    std::array<
+        std::shared_ptr<GpuSlot>, kGpuSlotCount> gpu_slots_;
+    std::atomic<std::uint32_t> next_gpu_slot_{0};
 #endif
 };
 

@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -29,6 +30,23 @@ void check(HRESULT result, const char* operation) {
         throw std::runtime_error(
             std::string(operation) + " failed with HRESULT " +
             std::to_string(static_cast<long>(result)));
+    }
+}
+
+void check_device(
+    HRESULT result,
+    ID3D12Device* device,
+    const char* operation) {
+    if (FAILED(result)) {
+        const HRESULT removed =
+            device != nullptr
+            ? device->GetDeviceRemovedReason()
+            : S_OK;
+        throw std::runtime_error(
+            std::string(operation) + " failed with HRESULT " +
+            std::to_string(static_cast<long>(result)) +
+            "; device removed reason " +
+            std::to_string(static_cast<long>(removed)));
     }
 }
 
@@ -552,15 +570,29 @@ std::vector<float> read_depth(
     commands->ResourceBarrier(1, &barrier);
     commands->CopyBufferRegion(
         readback.Get(), 0, output.Get(), 0, descriptor.byte_size);
+    const D3D12_RESOURCE_BARRIER restore{
+        D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        {
+            {
+                output.Get(),
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COMMON,
+            },
+        },
+    };
+    commands->ResourceBarrier(1, &restore);
     check(commands->Close(), "Close(readback)");
     ID3D12CommandList* submitted[] = {commands.Get()};
     queue->ExecuteCommandLists(1, submitted);
     ComPtr<ID3D12Fence> complete;
-    check(
+    check_device(
         device->CreateFence(
             0,
             D3D12_FENCE_FLAG_NONE,
             IID_PPV_ARGS(&complete)),
+        device,
         "CreateFence(readback)");
     check(queue->Signal(complete.Get(), 1), "Signal(readback)");
     cpu_wait(complete.Get(), 1);
@@ -689,15 +721,29 @@ std::vector<float> read_depth_texture(
     source.SubresourceIndex = 0;
     commands->CopyTextureRegion(
         &destination, 0, 0, 0, &source, nullptr);
+    const D3D12_RESOURCE_BARRIER restore{
+        D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        {
+            {
+                output.Get(),
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COMMON,
+            },
+        },
+    };
+    commands->ResourceBarrier(1, &restore);
     check(commands->Close(), "Close(texture readback)");
     ID3D12CommandList* submitted[] = {commands.Get()};
     queue->ExecuteCommandLists(1, submitted);
     ComPtr<ID3D12Fence> complete;
-    check(
+    check_device(
         device->CreateFence(
             0,
             D3D12_FENCE_FLAG_NONE,
             IID_PPV_ARGS(&complete)),
+        device,
         "CreateFence(texture readback)");
     check(
         queue->Signal(complete.Get(), 1),
@@ -792,13 +838,17 @@ void compare_reference(
             reference.size()),
         "dav2_infer_bgr8(reference)");
     float maximum_difference = 0.0f;
+    std::size_t maximum_index = 0;
     float reference_range =
         *std::max_element(reference.begin(), reference.end()) -
         *std::min_element(reference.begin(), reference.end());
     for (std::size_t index = 0; index < gpu.size(); ++index) {
-        maximum_difference = std::max(
-            maximum_difference,
-            std::abs(gpu[index] - reference[index]));
+        const float difference =
+            std::abs(gpu[index] - reference[index]);
+        if (difference > maximum_difference) {
+            maximum_difference = difference;
+            maximum_index = index;
+        }
     }
     const float relative =
         maximum_difference /
@@ -806,7 +856,15 @@ void compare_reference(
     std::cout << "CPU correlation max/range=" << relative << '\n';
     if (relative >= 0.01f) {
         throw std::runtime_error(
-            "GPU-resident path exceeds the 1% CPU-output deviation gate");
+            "GPU-resident path exceeds the 1% CPU-output deviation gate "
+            "at index " + std::to_string(maximum_index) +
+            ": gpu=" + std::to_string(gpu[maximum_index]) +
+            " reference=" +
+            std::to_string(reference[maximum_index]) +
+            " maximum_difference=" +
+            std::to_string(maximum_difference) +
+            " reference_range=" +
+            std::to_string(reference_range));
     }
 }
 
@@ -847,7 +905,9 @@ int main() try {
         dav2_get_gpu_capabilities(context, &capabilities),
         "dav2_get_gpu_capabilities");
     if (probed.flags != capabilities.flags ||
-        probed.adapter_luid != capabilities.adapter_luid) {
+        probed.adapter_luid != capabilities.adapter_luid ||
+        probed.maximum_in_flight_jobs !=
+            capabilities.maximum_in_flight_jobs) {
         throw std::runtime_error(
             "pre-model and loaded-model GPU capabilities disagree");
     }
@@ -872,6 +932,10 @@ int main() try {
         dav2_destroy(context);
         std::cout << "complete D3D12/Vulkan interop unavailable\n";
         return 77;
+    }
+    if (capabilities.maximum_in_flight_jobs != 3) {
+        throw std::runtime_error(
+            "DAV2 did not report the three-slot GPU job pool");
     }
     ComPtr<ID3D12Device> device =
         matching_device(capabilities.adapter_luid);
@@ -1097,6 +1161,212 @@ int main() try {
                   << (rgba ? " RGBA" : " BGRA")
                   << " GPU-resident graph passed\n";
     }
+
+    dav2_transfer_counters pool_before{};
+    pool_before.struct_size = sizeof(pool_before);
+    check(
+        dav2_get_transfer_counters(context, &pool_before),
+        "dav2_get_transfer_counters(pool before)");
+    std::array<dav2_gpu_output_lease*, 3> retained_leases{};
+    std::array<dav2_d3d12_texture_output_descriptor, 3>
+        retained_outputs{};
+    for (std::uint32_t frame = 0; frame < 3; ++frame) {
+        const std::vector<std::uint8_t> pool_pixels =
+            make_pixels(width, height, frame + 40);
+        SharedTextureInput input = upload_capture_texture(
+            device.Get(),
+            queue.Get(),
+            pool_pixels,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM);
+        dav2_d3d12_texture_submit_request pool_request{};
+        pool_request.struct_size = sizeof(pool_request);
+        pool_request.abi_version = DAV2_ABI_VERSION;
+        pool_request.shared_texture_handle =
+            reinterpret_cast<std::uintptr_t>(
+                input.resource_handle);
+        pool_request.width = width;
+        pool_request.height = height;
+        pool_request.pixel_format = DAV2_GPU_PIXEL_BGRA8;
+        pool_request.input_size = 140;
+        pool_request.wait_fence_handle =
+            reinterpret_cast<std::uintptr_t>(
+                input.fence_handle);
+        pool_request.wait_fence_value = input.fence_value;
+        pool_request.source_frame_id = 11000 + frame;
+        pool_request.timestamp_ns = 323456789 + frame;
+        dav2_gpu_job* pool_job = nullptr;
+        check(
+            dav2_submit_d3d12_texture(
+                context, &pool_request, &pool_job),
+            "dav2_submit_d3d12_texture(pool)");
+        CloseHandle(input.resource_handle);
+        input.resource_handle = nullptr;
+        CloseHandle(input.fence_handle);
+        input.fence_handle = nullptr;
+        input.resource.Reset();
+        input.ready.Reset();
+
+        retained_outputs[frame].struct_size =
+            sizeof(retained_outputs[frame]);
+        check(
+            dav2_gpu_texture_output_acquire(
+                pool_job,
+                0,
+                &retained_outputs[frame],
+                &retained_leases[frame]),
+            "dav2_gpu_texture_output_acquire(pool)");
+        wait_depth_texture_ready(
+            device.Get(), retained_outputs[frame]);
+        dav2_gpu_job_status pool_status{};
+        pool_status.struct_size = sizeof(pool_status);
+        check(
+            dav2_gpu_job_poll(pool_job, &pool_status),
+            "dav2_gpu_job_poll(pool)");
+        if (pool_status.state != DAV2_GPU_JOB_COMPLETE ||
+            pool_status.source_frame_id !=
+                pool_request.source_frame_id ||
+            retained_outputs[frame].source_frame_id !=
+                pool_request.source_frame_id ||
+            retained_outputs[frame].timestamp_ns !=
+                pool_request.timestamp_ns) {
+            throw std::runtime_error(
+                "retained GPU slot correlation failed");
+        }
+        const std::vector<float> pool_depth =
+            read_depth_texture(
+                device.Get(),
+                queue.Get(),
+                retained_outputs[frame]);
+        validate_depth(pool_depth);
+        dav2_gpu_job_release(pool_job);
+    }
+    for (std::size_t left = 0;
+         left < retained_outputs.size();
+         ++left) {
+        for (std::size_t right = left + 1;
+             right < retained_outputs.size();
+             ++right) {
+            if (retained_outputs[left].shared_texture_handle ==
+                    retained_outputs[right].shared_texture_handle ||
+                retained_outputs[left].ready_fence_handle ==
+                    retained_outputs[right].ready_fence_handle) {
+                throw std::runtime_error(
+                    "live GPU slots did not expose distinct handles");
+            }
+        }
+    }
+
+    const std::vector<std::uint8_t> dropped_pixels =
+        make_pixels(width, height, 43);
+    SharedTextureInput dropped_input = upload_capture_texture(
+        device.Get(),
+        queue.Get(),
+        dropped_pixels,
+        width,
+        height,
+        DXGI_FORMAT_B8G8R8A8_UNORM);
+    dav2_d3d12_texture_submit_request dropped_request{};
+    dropped_request.struct_size = sizeof(dropped_request);
+    dropped_request.abi_version = DAV2_ABI_VERSION;
+    dropped_request.shared_texture_handle =
+        reinterpret_cast<std::uintptr_t>(
+            dropped_input.resource_handle);
+    dropped_request.width = width;
+    dropped_request.height = height;
+    dropped_request.pixel_format = DAV2_GPU_PIXEL_BGRA8;
+    dropped_request.input_size = 140;
+    dropped_request.wait_fence_handle =
+        reinterpret_cast<std::uintptr_t>(
+            dropped_input.fence_handle);
+    dropped_request.wait_fence_value =
+        dropped_input.fence_value;
+    dropped_request.source_frame_id = 11003;
+    dropped_request.timestamp_ns = 323456792;
+    dav2_gpu_job* dropped_job = nullptr;
+    if (dav2_submit_d3d12_texture(
+            context,
+            &dropped_request,
+            &dropped_job) != DAV2_STATUS_INVALID_STATE ||
+        dropped_job != nullptr) {
+        throw std::runtime_error(
+            "fourth live GPU job was not rejected");
+    }
+
+    const std::uint64_t reusable_texture =
+        retained_outputs[0].shared_texture_handle;
+    const std::uint64_t reusable_fence =
+        retained_outputs[0].ready_fence_handle;
+    const std::uint64_t previous_fence_value =
+        retained_outputs[0].ready_fence_value;
+    dav2_gpu_output_release(retained_leases[0]);
+    retained_leases[0] = nullptr;
+
+    dav2_gpu_job* reused_job = nullptr;
+    check(
+        dav2_submit_d3d12_texture(
+            context, &dropped_request, &reused_job),
+        "dav2_submit_d3d12_texture(reuse)");
+    CloseHandle(dropped_input.resource_handle);
+    dropped_input.resource_handle = nullptr;
+    CloseHandle(dropped_input.fence_handle);
+    dropped_input.fence_handle = nullptr;
+    dropped_input.resource.Reset();
+    dropped_input.ready.Reset();
+    dav2_d3d12_texture_output_descriptor reused_output{};
+    reused_output.struct_size = sizeof(reused_output);
+    dav2_gpu_output_lease* reused_lease = nullptr;
+    check(
+        dav2_gpu_texture_output_acquire(
+            reused_job, 0, &reused_output, &reused_lease),
+        "dav2_gpu_texture_output_acquire(reuse)");
+    if (reused_output.shared_texture_handle !=
+            reusable_texture ||
+        reused_output.ready_fence_handle != reusable_fence ||
+        reused_output.ready_fence_value <=
+            previous_fence_value ||
+        reused_output.source_frame_id !=
+            dropped_request.source_frame_id ||
+        reused_output.timestamp_ns !=
+            dropped_request.timestamp_ns) {
+        throw std::runtime_error(
+            "released GPU slot was not stably reused");
+    }
+    wait_depth_texture_ready(device.Get(), reused_output);
+    const std::vector<float> reused_depth =
+        read_depth_texture(
+            device.Get(), queue.Get(), reused_output);
+    validate_depth(reused_depth);
+    dav2_gpu_job_release(reused_job);
+    dav2_gpu_output_release(reused_lease);
+    for (std::size_t index = 1;
+         index < retained_leases.size();
+         ++index) {
+        dav2_gpu_output_release(retained_leases[index]);
+        retained_leases[index] = nullptr;
+    }
+    dav2_transfer_counters pool_after{};
+    pool_after.struct_size = sizeof(pool_after);
+    check(
+        dav2_get_transfer_counters(context, &pool_after),
+        "dav2_get_transfer_counters(pool after)");
+    if (pool_after.tensor_upload_bytes !=
+            pool_before.tensor_upload_bytes ||
+        pool_after.tensor_download_bytes !=
+            pool_before.tensor_download_bytes) {
+        throw std::runtime_error(
+            "GPU slot pool staged pixels or depth through the CPU");
+    }
+    compare_reference(
+        context,
+        dropped_pixels,
+        width,
+        height,
+        reused_depth);
+    std::cout
+        << "three retained texture leases, exhaustion, and stable "
+           "slot reuse passed\n";
 
     // Hold the imported wait unsignaled so cancellation is deterministic.
     const std::vector<std::uint8_t> pixels =
