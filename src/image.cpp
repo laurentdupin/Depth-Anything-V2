@@ -13,17 +13,24 @@ int round_to_multiple(double value, int multiple) {
     return static_cast<int>(std::nearbyint(value / multiple)) * multiple;
 }
 
-double cubic(double x) {
-    // OpenCV INTER_CUBIC uses Keys' cubic convolution with a = -0.75.
-    constexpr double a = -0.75;
-    x = std::abs(x);
-    if (x <= 1.0) {
-        return (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0;
-    }
-    if (x < 2.0) {
-        return a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a;
-    }
-    return 0.0;
+void cubic_coefficients(float x, float coefficients[4]) {
+    // Keep the float expressions and evaluation order used by OpenCV's
+    // interpolateCubic. The Python reference resizes a float64 image, but
+    // OpenCV deliberately computes interpolation coefficients in float32.
+    constexpr float a = -0.75f;
+    coefficients[0] =
+        ((a * (x + 1.0f) - 5.0f * a) * (x + 1.0f) + 8.0f * a) *
+            (x + 1.0f) -
+        4.0f * a;
+    coefficients[1] =
+        ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
+    const float opposite = 1.0f - x;
+    coefficients[2] =
+        ((a + 2.0f) * opposite - (a + 3.0f)) *
+            opposite * opposite +
+        1.0f;
+    coefficients[3] =
+        1.0f - coefficients[0] - coefficients[1] - coefficients[2];
 }
 
 int clamp_index(int value, int limit) {
@@ -78,33 +85,72 @@ void preprocess_bgr8(
 
     const double scale_x = static_cast<double>(width) / destination.width;
     const double scale_y = static_cast<double>(height) / destination.height;
-    for (int dy = 0; dy < destination.height; ++dy) {
-        const double sy = (dy + 0.5) * scale_y - 0.5;
-        const int iy = static_cast<int>(std::floor(sy));
-        for (int dx = 0; dx < destination.width; ++dx) {
-            const double sx = (dx + 0.5) * scale_x - 0.5;
-            const int ix = static_cast<int>(std::floor(sx));
-            double rgb[3] = {};
-            for (int ky = -1; ky <= 2; ++ky) {
-                const int py = clamp_index(iy + ky, height);
-                const double wy = cubic(sy - (iy + ky));
-                const std::uint8_t* row = source + static_cast<std::ptrdiff_t>(py) * stride;
-                for (int kx = -1; kx <= 2; ++kx) {
-                    const int px = clamp_index(ix + kx, width);
-                    const double weight = wy * cubic(sx - (ix + kx));
-                    const std::uint8_t* pixel = row + static_cast<std::ptrdiff_t>(px) * 3;
-                    rgb[0] += weight * pixel[2];
-                    rgb[1] += weight * pixel[1];
-                    rgb[2] += weight * pixel[0];
-                }
-            }
+    std::vector<int> x_indices(static_cast<std::size_t>(destination.width));
+    std::vector<float> x_coefficients(
+        static_cast<std::size_t>(destination.width) * 4);
+    for (int dx = 0; dx < destination.width; ++dx) {
+        const float coordinate =
+            static_cast<float>((dx + 0.5) * scale_x - 0.5);
+        const int index = static_cast<int>(std::floor(coordinate));
+        x_indices[dx] = index;
+        cubic_coefficients(
+            coordinate - index,
+            x_coefficients.data() + static_cast<std::size_t>(dx) * 4);
+    }
 
+    // OpenCV performs cubic resize as a separable filter with double
+    // intermediate rows and float coefficients for a CV_64F input.
+    std::vector<double> horizontal(
+        static_cast<std::size_t>(height) * destination.width * 3);
+    for (int sy = 0; sy < height; ++sy) {
+        const std::uint8_t* row =
+            source + static_cast<std::ptrdiff_t>(sy) * stride;
+        for (int dx = 0; dx < destination.width; ++dx) {
+            const float* alpha =
+                x_coefficients.data() + static_cast<std::size_t>(dx) * 4;
+            const int base = x_indices[dx];
+            for (int channel = 0; channel < 3; ++channel) {
+                double value = 0.0;
+                for (int tap = 0; tap < 4; ++tap) {
+                    const int sx = clamp_index(base - 1 + tap, width);
+                    const std::uint8_t* pixel =
+                        row + static_cast<std::ptrdiff_t>(sx) * 3;
+                    const int bgr_channel = 2 - channel;
+                    const double unit =
+                        static_cast<double>(pixel[bgr_channel]) / 255.0;
+                    value += unit * alpha[tap];
+                }
+                horizontal[
+                    (static_cast<std::size_t>(sy) * destination.width + dx) *
+                        3 +
+                    channel] = value;
+            }
+        }
+    }
+
+    for (int dy = 0; dy < destination.height; ++dy) {
+        const float coordinate =
+            static_cast<float>((dy + 0.5) * scale_y - 0.5);
+        const int base = static_cast<int>(std::floor(coordinate));
+        float beta[4];
+        cubic_coefficients(coordinate - base, beta);
+        for (int dx = 0; dx < destination.width; ++dx) {
             const std::size_t offset =
                 static_cast<std::size_t>(dy) * destination.width + dx;
             for (int channel = 0; channel < 3; ++channel) {
-                const double unit = rgb[channel] / 255.0;
+                const auto sample = [&](int tap) {
+                    const int sy = clamp_index(base - 1 + tap, height);
+                    return horizontal[
+                        (static_cast<std::size_t>(sy) * destination.width + dx) *
+                            3 +
+                        channel];
+                };
+                const double resized =
+                    sample(0) * beta[0] + sample(1) * beta[1] +
+                    sample(2) * beta[2] + sample(3) * beta[3];
                 rgb_chw[static_cast<std::size_t>(channel) * plane + offset] =
-                    static_cast<float>((unit - mean[channel]) / stddev[channel]);
+                    static_cast<float>(
+                        (resized - mean[channel]) / stddev[channel]);
             }
         }
     }

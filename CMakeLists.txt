@@ -65,4 +65,8 @@ if(DAV2_BUILD_TESTS)
     add_executable(dav2_image_tests tests/image_tests.cpp src/image.cpp)
     target_include_directories(dav2_image_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME dav2_image_tests COMMAND dav2_image_tests)
+
+    add_executable(dav2_preprocess_probe tools/dav2_preprocess_probe.cpp src/image.cpp)
+    target_include_directories(
+        dav2_preprocess_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
