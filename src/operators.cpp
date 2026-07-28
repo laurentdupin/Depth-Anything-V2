@@ -507,9 +507,8 @@ void VulkanOperators::project_tokens(
         {&output, &tokens, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(width, 8),
-        divide_up(height, 8),
-        output_channels);
+        divide_up(output_channels, 32),
+        divide_up(width * height, 32));
 }
 
 void VulkanOperators::conv2d(
