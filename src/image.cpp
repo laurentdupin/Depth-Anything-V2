@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -40,31 +42,87 @@ int clamp_index(int value, int limit) {
     return std::max(0, std::min(value, limit - 1));
 }
 
-template <typename Function>
-void parallel_rows(int rows, Function&& function) {
+template <typename First, typename Second>
+void parallel_phases(
+    int first_rows,
+    int second_rows,
+    First&& first,
+    Second&& second) {
     const unsigned available =
         std::max(1u, std::thread::hardware_concurrency());
     const unsigned workers = std::min<unsigned>(
-        available, static_cast<unsigned>(rows));
-    if (workers <= 1 || rows < 32) {
-        function(0, rows);
+        available,
+        static_cast<unsigned>(std::max(first_rows, second_rows)));
+    if (workers <= 1 || std::max(first_rows, second_rows) < 32) {
+        first(0, first_rows);
+        second(0, second_rows);
         return;
     }
     std::vector<std::thread> threads;
     threads.reserve(workers);
+    std::mutex phase_mutex;
+    std::condition_variable phase_ready;
+    unsigned first_finished = 0;
+    std::mutex launch_mutex;
+    std::condition_variable launch_ready;
+    bool launch = false;
+    bool cancel = false;
     try {
         for (unsigned worker = 0; worker < workers; ++worker) {
-            const int begin =
+            const int first_begin =
                 static_cast<int>(
-                    std::uint64_t(rows) * worker / workers);
-            const int end =
+                    std::uint64_t(first_rows) * worker / workers);
+            const int first_end =
                 static_cast<int>(
-                    std::uint64_t(rows) * (worker + 1) / workers);
-            threads.emplace_back([&, begin, end] {
-                function(begin, end);
+                    std::uint64_t(first_rows) *
+                    (worker + 1) / workers);
+            const int second_begin =
+                static_cast<int>(
+                    std::uint64_t(second_rows) * worker / workers);
+            const int second_end =
+                static_cast<int>(
+                    std::uint64_t(second_rows) *
+                    (worker + 1) / workers);
+            threads.emplace_back([&,
+                                  first_begin,
+                                  first_end,
+                                  second_begin,
+                                  second_end] {
+                {
+                    std::unique_lock<std::mutex> lock(launch_mutex);
+                    launch_ready.wait(lock, [&] {
+                        return launch || cancel;
+                    });
+                    if (cancel) {
+                        return;
+                    }
+                }
+                first(first_begin, first_end);
+                {
+                    std::unique_lock<std::mutex> lock(phase_mutex);
+                    ++first_finished;
+                    if (first_finished == workers) {
+                        phase_ready.notify_all();
+                    } else {
+                        phase_ready.wait(lock, [&] {
+                            return first_finished == workers;
+                        });
+                    }
+                }
+                second(second_begin, second_end);
             });
         }
+        {
+            std::lock_guard<std::mutex> lock(launch_mutex);
+            launch = true;
+        }
+        launch_ready.notify_all();
     } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(launch_mutex);
+            cancel = true;
+        }
+        launch_ready.notify_all();
         for (std::thread& thread : threads) {
             thread.join();
         }
@@ -142,7 +200,7 @@ void preprocess_bgr8(
     // intermediate rows and float coefficients for a CV_64F input.
     scratch.horizontal.resize(
         static_cast<std::size_t>(height) * destination.width * 3);
-    parallel_rows(height, [&](int begin, int end) {
+    const auto horizontal_phase = [&](int begin, int end) {
         for (int sy = begin; sy < end; ++sy) {
             const std::uint8_t* row =
                 source + static_cast<std::ptrdiff_t>(sy) * stride;
@@ -170,9 +228,9 @@ void preprocess_bgr8(
                 }
             }
         }
-    });
+    };
 
-    parallel_rows(destination.height, [&](int begin, int end) {
+    const auto vertical_phase = [&](int begin, int end) {
         for (int dy = begin; dy < end; ++dy) {
             const float coordinate =
                 static_cast<float>((dy + 0.5) * scale_y - 0.5);
@@ -202,7 +260,12 @@ void preprocess_bgr8(
                 }
             }
         }
-    });
+    };
+    parallel_phases(
+        height,
+        destination.height,
+        horizontal_phase,
+        vertical_phase);
 }
 
 void preprocess_bgr8(
