@@ -86,8 +86,7 @@ EncoderOutput DinoEncoder::forward(
     VulkanBuffer next = context_.create_device_buffer(token_bytes);
     VulkanBuffer normalized = context_.create_device_buffer(token_bytes);
     VulkanBuffer query = context_.create_device_buffer(token_bytes);
-    VulkanBuffer key = context_.create_device_buffer(token_bytes);
-    VulkanBuffer value = context_.create_device_buffer(token_bytes);
+    VulkanBuffer attention = context_.create_device_buffer(token_bytes);
     VulkanBuffer qkv =
         context_.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden =
@@ -133,13 +132,11 @@ EncoderOutput DinoEncoder::forward(
                 embedding_,
                 embedding_ * 3,
                 false);
-            operators_.split_qkv(
-                query, key, value, qkv, tokens, heads_);
             operators_.attention_head64(
-                qkv, query, key, value, tokens, heads_);
+                attention, qkv, tokens, heads_);
             operators_.linear(
                 query,
-                qkv,
+                attention,
                 buffer(weights_, block_name(block, ".attn.proj.weight")),
                 buffer(weights_, block_name(block, ".attn.proj.bias")),
                 tokens,

@@ -19,6 +19,9 @@ layout(push_constant) uniform Parameters {
     uint batches;
     uint weight_transposed;
     uint output_token_major;
+    uint qkv_embedding;
+    uint input_qkv_query;
+    uint weight_qkv_kind;
 } parameters;
 
 shared float input_tile[64 * 16];
@@ -47,15 +50,23 @@ void main() {
             const uint inner = inner_base + index % 16;
             const uint output_row =
                 gl_WorkGroupID.y * 64 + tile_row;
-            input_tile[index] =
-                batch < parameters.batches &&
-                    output_row < parameters.rows &&
-                    inner < parameters.inner
-                ? input_buffer.data[
-                    (batch * parameters.rows + output_row) *
-                        parameters.inner +
-                    inner]
-                : 0.0;
+            if (batch < parameters.batches &&
+                output_row < parameters.rows &&
+                inner < parameters.inner) {
+                if (parameters.input_qkv_query != 0) {
+                    precise float scaled_query =
+                        input_buffer.data[
+                            output_row * parameters.qkv_embedding * 3 +
+                            batch * 64 + inner] * 0.125;
+                    input_tile[index] = scaled_query;
+                } else {
+                    input_tile[index] = input_buffer.data[
+                        (batch * parameters.rows + output_row) *
+                            parameters.inner + inner];
+                }
+            } else {
+                input_tile[index] = 0.0;
+            }
         }
         for (uint index = lane; index < 32 * 16; index += 64) {
             const uint tile_column = index / 16;
@@ -65,14 +76,30 @@ void main() {
             if (batch < parameters.batches &&
                 output_column < parameters.columns &&
                 inner < parameters.inner) {
-                weight_tile[index] =
-                    parameters.weight_transposed != 0
+                if (parameters.weight_qkv_kind != 0) {
+                    const uint token =
+                        parameters.weight_qkv_kind == 1
+                        ? output_column
+                        : inner;
+                    const uint feature =
+                        parameters.weight_qkv_kind == 1
+                        ? inner
+                        : output_column;
+                    weight_tile[index] = weight_buffer.data[
+                        token * parameters.qkv_embedding * 3 +
+                        parameters.weight_qkv_kind *
+                            parameters.qkv_embedding +
+                        batch * 64 + feature];
+                } else {
+                    weight_tile[index] =
+                        parameters.weight_transposed != 0
                     ? weight_buffer.data[
                           (batch * parameters.columns + output_column) *
                               parameters.inner + inner]
                     : weight_buffer.data[
                           (batch * parameters.inner + inner) *
                               parameters.columns + output_column];
+                }
             } else {
                 weight_tile[index] = 0.0;
             }

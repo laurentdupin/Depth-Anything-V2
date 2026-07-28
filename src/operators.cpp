@@ -10,12 +10,10 @@
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
-#include "merge_heads_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
 #include "relu_spv.h"
-#include "split_qkv_spv.h"
 #include "softmax_lastdim_spv.h"
 
 #include <limits>
@@ -52,17 +50,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_layer_norm_spv, dav2_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
           dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
-      split_qkv_(context.create_pipeline(
-          dav2_split_qkv_spv, dav2_split_qkv_spv_size, 4, 16)),
       bmm_(context.create_pipeline(
-          dav2_bmm_spv, dav2_bmm_spv_size, 3, 24)),
+          dav2_bmm_spv, dav2_bmm_spv_size, 3, 36)),
       softmax_lastdim_(context.create_pipeline(
           dav2_softmax_lastdim_spv,
           dav2_softmax_lastdim_spv_size,
           2,
           8)),
-      merge_heads_(context.create_pipeline(
-          dav2_merge_heads_spv, dav2_merge_heads_spv_size, 2, 8)),
       prepare_tokens_(context.create_pipeline(
           dav2_prepare_tokens_spv,
           dav2_prepare_tokens_spv_size,
@@ -205,43 +199,9 @@ void VulkanOperators::add_scaled(
         divide_up(count, 256));
 }
 
-void VulkanOperators::split_qkv(
-    VulkanBuffer& query,
-    VulkanBuffer& key,
-    VulkanBuffer& value,
-    const VulkanBuffer& qkv,
-    std::uint32_t tokens,
-    std::uint32_t heads) {
-    if (tokens == 0 || heads == 0) {
-        throw std::invalid_argument("invalid QKV dimensions");
-    }
-    const std::uint64_t embedding = std::uint64_t(heads) * 64;
-    const std::uint64_t elements = std::uint64_t(tokens) * embedding;
-    require_bytes(qkv, elements * 3, "QKV");
-    require_bytes(query, elements, "query");
-    require_bytes(key, elements, "key");
-    require_bytes(value, elements, "value");
-    struct Parameters {
-        std::uint32_t tokens;
-        std::uint32_t heads;
-        std::uint32_t embedding;
-        float query_scale;
-    } parameters{tokens, heads, heads * 64, 0.125f};
-    context_.dispatch(
-        split_qkv_,
-        {&query, &key, &value, &qkv},
-        &parameters,
-        sizeof(parameters),
-        8,
-        divide_up(tokens, 8),
-        heads);
-}
-
 void VulkanOperators::attention_head64(
     VulkanBuffer& output,
-    const VulkanBuffer& query,
-    const VulkanBuffer& key,
-    const VulkanBuffer& value,
+    const VulkanBuffer& qkv,
     std::uint32_t tokens,
     std::uint32_t heads) {
     if (tokens == 0 || heads == 0) {
@@ -250,9 +210,7 @@ void VulkanOperators::attention_head64(
     const std::uint64_t elements =
         std::uint64_t(tokens) * heads * 64;
     require_bytes(output, elements, "attention output");
-    require_bytes(query, elements, "query");
-    require_bytes(key, elements, "key");
-    require_bytes(value, elements, "value");
+    require_bytes(qkv, elements * 3, "QKV");
     const std::uint64_t score_elements =
         std::uint64_t(heads) * tokens * tokens;
     VulkanBuffer scores =
@@ -266,10 +224,14 @@ void VulkanOperators::attention_head64(
         std::uint32_t batches;
         std::uint32_t weight_transposed;
         std::uint32_t output_token_major;
-    } score_parameters{tokens, tokens, 64, heads, 1, 0};
+        std::uint32_t qkv_embedding;
+        std::uint32_t input_qkv_query;
+        std::uint32_t weight_qkv_kind;
+    } score_parameters{
+        tokens, tokens, 64, heads, 0, 0, heads * 64, 1, 1};
     context_.dispatch(
         bmm_,
-        {&scores, &query, &key},
+        {&scores, &qkv, &qkv},
         &score_parameters,
         sizeof(score_parameters),
         divide_up(divide_up(tokens, 4), 8),
@@ -285,40 +247,15 @@ void VulkanOperators::attention_head64(
         &softmax_parameters,
         sizeof(softmax_parameters),
         softmax_parameters.rows);
-    BmmParameters value_parameters{tokens, 64, tokens, heads, 0, 1};
+    BmmParameters value_parameters{
+        tokens, 64, tokens, heads, 0, 1, heads * 64, 0, 2};
     context_.dispatch(
         bmm_,
-        {&output, &probabilities, &value},
+        {&output, &probabilities, &qkv},
         &value_parameters,
         sizeof(value_parameters),
         divide_up(divide_up(64, 4), 8),
         divide_up(divide_up(tokens, 8), 8),
-        heads);
-}
-
-void VulkanOperators::merge_heads(
-    VulkanBuffer& output,
-    const VulkanBuffer& input,
-    std::uint32_t tokens,
-    std::uint32_t heads) {
-    if (tokens == 0 || heads == 0) {
-        throw std::invalid_argument("invalid head merge dimensions");
-    }
-    const std::uint64_t elements =
-        std::uint64_t(tokens) * heads * 64;
-    require_bytes(output, elements, "merged output");
-    require_bytes(input, elements, "attention input");
-    struct Parameters {
-        std::uint32_t tokens;
-        std::uint32_t heads;
-    } parameters{tokens, heads};
-    context_.dispatch(
-        merge_heads_,
-        {&output, &input},
-        &parameters,
-        sizeof(parameters),
-        8,
-        divide_up(tokens, 8),
         heads);
 }
 

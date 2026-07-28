@@ -289,27 +289,12 @@ int main() {
         attention_tokens * attention_embedding;
     auto gpu_qkv =
         context.create_device_buffer(qkv.size() * sizeof(float));
-    auto gpu_query =
-        context.create_device_buffer(attention_elements * sizeof(float));
-    auto gpu_key =
-        context.create_device_buffer(attention_elements * sizeof(float));
-    auto gpu_value =
-        context.create_device_buffer(attention_elements * sizeof(float));
     auto gpu_attention =
         context.create_device_buffer(attention_elements * sizeof(float));
     context.upload(gpu_qkv, qkv.data(), qkv.size() * sizeof(float));
-    operators.split_qkv(
-        gpu_query,
-        gpu_key,
-        gpu_value,
-        gpu_qkv,
-        attention_tokens,
-        attention_heads);
     operators.attention_head64(
         gpu_attention,
-        gpu_query,
-        gpu_key,
-        gpu_value,
+        gpu_qkv,
         attention_tokens,
         attention_heads);
     std::vector<float> merged(attention_elements);
