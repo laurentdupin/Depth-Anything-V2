@@ -43,10 +43,13 @@ void main() {
     for (uint column = lane;
          column < parameters.columns;
          column += 128) {
-        denominator += exp(
-            input_buffer.data[row * parameters.columns + column] -
-            maximum);
+        const uint index = row * parameters.columns + column;
+        const float exponential =
+            exp(input_buffer.data[index] - maximum);
+        output_buffer.data[index] = exponential;
+        denominator += exponential;
     }
+    memoryBarrierBuffer();
     partials[lane] = denominator;
     barrier();
     for (uint stride = 64; stride > 0; stride >>= 1) {
@@ -60,9 +63,7 @@ void main() {
     for (uint column = lane;
          column < parameters.columns;
          column += 128) {
-        output_buffer.data[row * parameters.columns + column] =
-            exp(input_buffer.data[row * parameters.columns + column] -
-                maximum) *
-            inverse;
+        const uint index = row * parameters.columns + column;
+        output_buffer.data[index] *= inverse;
     }
 }
