@@ -48,7 +48,9 @@ def main() -> None:
     if not isinstance(state, dict) or not state:
         raise TypeError("checkpoint is not a non-empty state dictionary")
 
-    tensors: list[tuple[str, tuple[int, ...], bytes]] = []
+    tensors: list[
+        tuple[str, tuple[int, ...], torch.Tensor, int, int]
+    ] = []
     for name in sorted(state):
         value = state[name]
         if not isinstance(value, torch.Tensor):
@@ -58,20 +60,29 @@ def main() -> None:
             raise ValueError(f"tensor name is too long: {name}")
         if not 1 <= value.ndim <= 4:
             raise ValueError(f"unsupported tensor rank for {name}: {value.ndim}")
-        tensors.append((name, tuple(value.shape), tensor_bytes(value)))
+        payload = tensor_bytes(value)
+        tensors.append(
+            (
+                name,
+                tuple(value.shape),
+                value,
+                len(payload),
+                zlib.crc32(payload),
+            )
+        )
 
     directory_offset = HEADER.size
     directory_bytes = len(tensors) * RECORD.size
     data_offset = align(directory_offset + directory_bytes)
     cursor = data_offset
     records = []
-    for name, shape, payload in tensors:
+    for name, shape, _, payload_bytes, checksum in tensors:
         cursor = align(cursor)
         dimensions = list(shape) + [0] * (4 - len(shape))
         element_count = 1
         for dimension in shape:
             element_count *= dimension
-        if element_count * 4 != len(payload):
+        if element_count * 4 != payload_bytes:
             raise RuntimeError(f"tensor byte count mismatch: {name}")
         records.append(
             RECORD.pack(
@@ -80,14 +91,14 @@ def main() -> None:
                 len(shape),
                 *dimensions,
                 cursor,
-                len(payload),
+                payload_bytes,
                 element_count,
-                zlib.crc32(payload),
+                checksum,
                 0,
                 0,
             )
         )
-        cursor += len(payload)
+        cursor += payload_bytes
     file_bytes = cursor
     header = HEADER.pack(
         MAGIC,
@@ -108,10 +119,13 @@ def main() -> None:
         for record in records:
             output.write(record)
         output.write(b"\0" * (data_offset - output.tell()))
-        for (_, _, payload), record in zip(tensors, records):
+        for (_, _, tensor, payload_bytes, _), record in zip(tensors, records):
             record_values = RECORD.unpack(record)
             tensor_offset = record_values[7]
             output.write(b"\0" * (tensor_offset - output.tell()))
+            payload = tensor_bytes(tensor)
+            if len(payload) != payload_bytes:
+                raise RuntimeError("tensor changed while exporting")
             output.write(payload)
         if output.tell() != file_bytes:
             raise RuntimeError(
