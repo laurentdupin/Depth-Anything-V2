@@ -13,6 +13,7 @@
 #endif
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -22,6 +23,20 @@
 namespace dav2 {
 
 class VulkanContext;
+class VulkanPipeline;
+
+struct VulkanDeferredBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
+    VkDeviceSize size = 0;
+    bool cacheable = false;
+};
+
+struct VulkanBatchedDescriptor {
+    VulkanPipeline* pipeline = nullptr;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+};
 
 struct VulkanExternalCapabilities {
     bool d3d12_resource_import = false;
@@ -58,9 +73,11 @@ public:
 
 private:
     friend class VulkanContext;
+    struct Resources;
     VulkanContext* owner_ = nullptr;
     VkCommandBuffer command_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
+    Resources* resources_ = nullptr;
 };
 
 class VulkanBuffer {
@@ -140,6 +157,15 @@ public:
         const VulkanBuffer& source,
         void* data,
         std::size_t bytes);
+    void transfer_counters(
+        std::uint64_t& upload_bytes,
+        std::uint64_t& download_bytes) const;
+    void acquire_external_buffer(
+        const VulkanBuffer& buffer,
+        VkAccessFlags destination_access);
+    void release_external_buffer(
+        const VulkanBuffer& buffer,
+        VkAccessFlags source_access);
 
     VulkanPipeline create_pipeline(
         const std::uint32_t* spirv,
@@ -178,12 +204,31 @@ public:
         }
     }
 
+    template <typename Function>
+    VulkanSubmission batch_async(
+        VulkanSemaphore wait,
+        VulkanSemaphore signal,
+        Function&& function) {
+        if (batch_command_ != VK_NULL_HANDLE) {
+            throw std::logic_error(
+                "asynchronous Vulkan batch cannot be nested");
+        }
+        begin_batch();
+        try {
+            std::forward<Function>(function)();
+            return end_batch_async(
+                std::move(wait), std::move(signal));
+        } catch (...) {
+            cancel_batch();
+            throw;
+        }
+    }
+
 private:
     friend class VulkanSemaphore;
     friend class VulkanSubmission;
     friend class VulkanBuffer;
     friend class VulkanPipeline;
-    struct DeferredBuffer;
 
     std::uint32_t find_memory_type(
         std::uint32_t type_bits,
@@ -199,19 +244,25 @@ private:
     VkCommandBuffer begin_commands();
     VulkanSubmission submit_commands(
         VkCommandBuffer command_buffer,
-        const VulkanSemaphore* wait = nullptr);
+        const VulkanSemaphore* wait = nullptr,
+        const VulkanSemaphore* signal = nullptr);
     void end_commands(
         VkCommandBuffer command_buffer,
         const VulkanSemaphore* wait = nullptr);
     void begin_batch();
     void end_batch();
+    VulkanSubmission end_batch_async(
+        VulkanSemaphore wait,
+        VulkanSemaphore signal);
     void cancel_batch() noexcept;
     void release_batch_resources() noexcept;
-    void recycle_or_destroy(DeferredBuffer buffer) noexcept;
+    void recycle_or_destroy(VulkanDeferredBuffer buffer) noexcept;
     void destroy(VulkanSemaphore& semaphore) noexcept;
     void destroy(VulkanSubmission& submission) noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
+    void release_submission_resources(
+        VulkanSubmission& submission) noexcept;
     void release() noexcept;
     static void check(VkResult result, const char* operation);
 
@@ -223,23 +274,12 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
-    struct DeferredBuffer {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        void* mapped = nullptr;
-        VkDeviceSize size = 0;
-        bool cacheable = false;
-    };
-    struct BatchedDescriptor {
-        VulkanPipeline* pipeline = nullptr;
-        VkDescriptorSet set = VK_NULL_HANDLE;
-    };
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
-    std::vector<BatchedDescriptor> batch_descriptor_sets_;
-    std::vector<DeferredBuffer> batch_deferred_buffers_;
-    std::vector<DeferredBuffer> device_buffer_pool_;
-    std::vector<DeferredBuffer> host_buffer_pool_;
+    std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
+    std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
+    std::vector<VulkanDeferredBuffer> device_buffer_pool_;
+    std::vector<VulkanDeferredBuffer> host_buffer_pool_;
     VkDeviceSize pooled_device_bytes_ = 0;
     VkDeviceSize pooled_host_bytes_ = 0;
     VulkanExternalCapabilities external_capabilities_{};
@@ -250,6 +290,8 @@ private:
     PFN_vkImportSemaphoreWin32HandleKHR
         import_semaphore_win32_handle_ = nullptr;
 #endif
+    std::atomic<std::uint64_t> tensor_upload_bytes_{0};
+    std::atomic<std::uint64_t> tensor_download_bytes_{0};
     std::string device_name_;
 };
 

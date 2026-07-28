@@ -317,6 +317,11 @@ void run_case(
 int main() {
     dav2::VulkanContext context(0);
     const auto& capabilities = context.external_capabilities();
+    std::cout
+        << "D3D12 resource import="
+        << capabilities.d3d12_resource_import
+        << " fence import=" << capabilities.d3d12_fence_import
+        << '\n';
     if (!capabilities.d3d12_resource_import ||
         !capabilities.d3d12_fence_import ||
         context.adapter_luid() == 0) {

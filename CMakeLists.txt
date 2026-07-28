@@ -121,6 +121,9 @@ if(DAV2_WITH_VULKAN)
     )
     target_include_directories(depth_anything_v2 PRIVATE "${DAV2_GENERATED_DIR}")
     target_link_libraries(depth_anything_v2 PRIVATE Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(depth_anything_v2 PRIVATE d3d12 dxgi)
+    endif()
 endif()
 
 include(GNUInstallDirs)
@@ -229,6 +232,24 @@ if(DAV2_BUILD_TESTS)
                 COMMAND dav2_vulkan_external_smoke)
             set_tests_properties(
                 dav2_vulkan_external_smoke
+                PROPERTIES SKIP_RETURN_CODE 77)
+
+            add_executable(
+                dav2_d3d12_full_graph
+                tests/d3d12_full_graph.cpp)
+            target_compile_features(
+                dav2_d3d12_full_graph PRIVATE cxx_std_17)
+            target_link_libraries(
+                dav2_d3d12_full_graph PRIVATE
+                    depth_anything_v2 d3d12 dxgi)
+            target_compile_definitions(
+                dav2_d3d12_full_graph PRIVATE
+                    "DAV2_DEFAULT_VITS_MODEL=\"${CMAKE_CURRENT_SOURCE_DIR}/validation/depth_anything_v2_vits.dav2\"")
+            add_test(
+                NAME dav2_d3d12_full_graph
+                COMMAND dav2_d3d12_full_graph)
+            set_tests_properties(
+                dav2_d3d12_full_graph
                 PROPERTIES SKIP_RETURN_CODE 77)
         endif()
     endif()

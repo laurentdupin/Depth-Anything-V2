@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -28,6 +29,13 @@ bool has_extension(
 #endif
 
 }  // namespace
+
+struct VulkanSubmission::Resources {
+    std::vector<VulkanBatchedDescriptor> descriptor_sets;
+    std::vector<VulkanDeferredBuffer> deferred_buffers;
+    VulkanSemaphore wait;
+    VulkanSemaphore signal;
+};
 
 void VulkanContext::check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
@@ -68,6 +76,7 @@ VulkanSubmission& VulkanSubmission::operator=(
         owner_ = std::exchange(other.owner_, nullptr);
         command_ = std::exchange(other.command_, VK_NULL_HANDLE);
         fence_ = std::exchange(other.fence_, VK_NULL_HANDLE);
+        resources_ = std::exchange(other.resources_, nullptr);
     }
     return *this;
 }
@@ -363,13 +372,13 @@ void VulkanContext::release() noexcept {
     if (device_) {
         vkDeviceWaitIdle(device_);
         cancel_batch();
-        for (DeferredBuffer& buffer : device_buffer_pool_) {
+        for (VulkanDeferredBuffer& buffer : device_buffer_pool_) {
             buffer.cacheable = false;
             recycle_or_destroy(buffer);
         }
         device_buffer_pool_.clear();
         pooled_device_bytes_ = 0;
-        for (DeferredBuffer& buffer : host_buffer_pool_) {
+        for (VulkanDeferredBuffer& buffer : host_buffer_pool_) {
             buffer.cacheable = false;
             recycle_or_destroy(buffer);
         }
@@ -646,6 +655,7 @@ VulkanSemaphore VulkanContext::import_d3d12_fence(
         throw;
     }
 }
+
 #endif
 
 VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
@@ -725,11 +735,17 @@ void VulkanContext::end_commands(
 
 VulkanSubmission VulkanContext::submit_commands(
     VkCommandBuffer command,
-    const VulkanSemaphore* wait) {
+    const VulkanSemaphore* wait,
+    const VulkanSemaphore* signal) {
     if (wait != nullptr && wait->owner_ != this) {
         vkFreeCommandBuffers(device_, command_pool_, 1, &command);
         throw std::invalid_argument(
             "foreign Vulkan wait semaphore");
+    }
+    if (signal != nullptr && signal->owner_ != this) {
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+        throw std::invalid_argument(
+            "foreign Vulkan signal semaphore");
     }
     try {
         check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
@@ -756,21 +772,25 @@ VulkanSubmission VulkanContext::submit_commands(
 #if defined(_WIN32)
     const std::uint64_t wait_value =
         wait != nullptr ? wait->value_ : 0;
+    const std::uint64_t signal_value =
+        signal != nullptr ? signal->value_ : 0;
     const VkD3D12FenceSubmitInfoKHR d3d12_values{
         VK_STRUCTURE_TYPE_D3D12_FENCE_SUBMIT_INFO_KHR,
         nullptr,
         wait != nullptr ? 1u : 0u,
         wait != nullptr ? &wait_value : nullptr,
-        0,
-        nullptr,
+        signal != nullptr ? 1u : 0u,
+        signal != nullptr ? &signal_value : nullptr,
     };
 #endif
     const VkSemaphore wait_handle =
         wait != nullptr ? wait->semaphore_ : VK_NULL_HANDLE;
+    const VkSemaphore signal_handle =
+        signal != nullptr ? signal->semaphore_ : VK_NULL_HANDLE;
     const VkSubmitInfo submit{
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
 #if defined(_WIN32)
-        wait != nullptr ? &d3d12_values : nullptr,
+        wait != nullptr || signal != nullptr ? &d3d12_values : nullptr,
 #else
         nullptr,
 #endif
@@ -779,8 +799,8 @@ VulkanSubmission VulkanContext::submit_commands(
         wait != nullptr ? &wait_stage : nullptr,
         1,
         &command,
-        0,
-        nullptr,
+        signal != nullptr ? 1u : 0u,
+        signal != nullptr ? &signal_handle : nullptr,
     };
     const VkResult submitted =
         vkQueueSubmit(queue_, 1, &submit, fence);
@@ -805,7 +825,7 @@ void VulkanContext::begin_batch() {
 }
 
 void VulkanContext::release_batch_resources() noexcept {
-    for (const BatchedDescriptor& descriptor :
+    for (const VulkanBatchedDescriptor& descriptor :
          batch_descriptor_sets_) {
         if (descriptor.pipeline && descriptor.set) {
             descriptor.pipeline->cached_descriptor_sets_.push_back(
@@ -813,10 +833,45 @@ void VulkanContext::release_batch_resources() noexcept {
         }
     }
     batch_descriptor_sets_.clear();
-    for (const DeferredBuffer& buffer : batch_deferred_buffers_) {
+    for (const VulkanDeferredBuffer& buffer : batch_deferred_buffers_) {
         recycle_or_destroy(buffer);
     }
     batch_deferred_buffers_.clear();
+}
+
+VulkanSubmission VulkanContext::end_batch_async(
+    VulkanSemaphore wait,
+    VulkanSemaphore signal) {
+    if (batch_command_ == VK_NULL_HANDLE) {
+        throw std::logic_error("no active Vulkan batch");
+    }
+    auto resources = std::make_unique<VulkanSubmission::Resources>();
+    resources->descriptor_sets = std::move(batch_descriptor_sets_);
+    resources->deferred_buffers = std::move(batch_deferred_buffers_);
+    resources->wait = std::move(wait);
+    resources->signal = std::move(signal);
+    VkCommandBuffer command = batch_command_;
+    batch_command_ = VK_NULL_HANDLE;
+    batch_has_dispatch_ = false;
+    try {
+        VulkanSubmission result = submit_commands(
+            command, &resources->wait, &resources->signal);
+        result.resources_ = resources.release();
+        return result;
+    } catch (...) {
+        for (const VulkanBatchedDescriptor& descriptor :
+             resources->descriptor_sets) {
+            if (descriptor.pipeline && descriptor.set) {
+                descriptor.pipeline->cached_descriptor_sets_.push_back(
+                    descriptor.set);
+            }
+        }
+        for (const VulkanDeferredBuffer& buffer :
+             resources->deferred_buffers) {
+            recycle_or_destroy(buffer);
+        }
+        throw;
+    }
 }
 
 void VulkanContext::end_batch() {
@@ -857,6 +912,9 @@ void VulkanContext::upload(
     if (data == nullptr || bytes > destination.size_) {
         throw std::invalid_argument("invalid Vulkan upload");
     }
+    tensor_upload_bytes_.fetch_add(
+        static_cast<std::uint64_t>(bytes),
+        std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     std::memcpy(staging.mapped_, data, bytes);
     copy_buffer(staging.buffer_, destination.buffer_, bytes);
@@ -869,9 +927,87 @@ void VulkanContext::download(
     if (data == nullptr || bytes > source.size_) {
         throw std::invalid_argument("invalid Vulkan download");
     }
+    tensor_download_bytes_.fetch_add(
+        static_cast<std::uint64_t>(bytes),
+        std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer(source.buffer_, staging.buffer_, bytes);
     std::memcpy(data, staging.mapped_, bytes);
+}
+
+void VulkanContext::transfer_counters(
+    std::uint64_t& upload_bytes,
+    std::uint64_t& download_bytes) const {
+    upload_bytes =
+        tensor_upload_bytes_.load(std::memory_order_relaxed);
+    download_bytes =
+        tensor_download_bytes_.load(std::memory_order_relaxed);
+}
+
+void VulkanContext::acquire_external_buffer(
+    const VulkanBuffer& buffer,
+    VkAccessFlags destination_access) {
+    if (batch_command_ == VK_NULL_HANDLE ||
+        buffer.owner_ != this ||
+        buffer.buffer_ == VK_NULL_HANDLE) {
+        throw std::invalid_argument(
+            "external buffer acquire requires an active batch");
+    }
+    const VkBufferMemoryBarrier barrier{
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        nullptr,
+        0,
+        destination_access,
+        VK_QUEUE_FAMILY_EXTERNAL,
+        queue_family_,
+        buffer.buffer_,
+        0,
+        buffer.size_,
+    };
+    vkCmdPipelineBarrier(
+        batch_command_,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        1,
+        &barrier,
+        0,
+        nullptr);
+}
+
+void VulkanContext::release_external_buffer(
+    const VulkanBuffer& buffer,
+    VkAccessFlags source_access) {
+    if (batch_command_ == VK_NULL_HANDLE ||
+        buffer.owner_ != this ||
+        buffer.buffer_ == VK_NULL_HANDLE) {
+        throw std::invalid_argument(
+            "external buffer release requires an active batch");
+    }
+    const VkBufferMemoryBarrier barrier{
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        nullptr,
+        source_access,
+        0,
+        queue_family_,
+        VK_QUEUE_FAMILY_EXTERNAL,
+        buffer.buffer_,
+        0,
+        buffer.size_,
+    };
+    vkCmdPipelineBarrier(
+        batch_command_,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        0,
+        nullptr,
+        1,
+        &barrier,
+        0,
+        nullptr);
 }
 
 VulkanPipeline VulkanContext::create_pipeline(
@@ -1162,9 +1298,28 @@ void VulkanContext::destroy(VulkanSubmission& submission) noexcept {
         vkFreeCommandBuffers(
             device_, command_pool_, 1, &submission.command_);
     }
+    release_submission_resources(submission);
     submission.owner_ = nullptr;
     submission.command_ = VK_NULL_HANDLE;
     submission.fence_ = VK_NULL_HANDLE;
+}
+
+void VulkanContext::release_submission_resources(
+    VulkanSubmission& submission) noexcept {
+    if (submission.resources_ == nullptr) return;
+    for (const VulkanBatchedDescriptor& descriptor :
+         submission.resources_->descriptor_sets) {
+        if (descriptor.pipeline && descriptor.set) {
+            descriptor.pipeline->cached_descriptor_sets_.push_back(
+                descriptor.set);
+        }
+    }
+    for (const VulkanDeferredBuffer& buffer :
+         submission.resources_->deferred_buffers) {
+        recycle_or_destroy(buffer);
+    }
+    delete submission.resources_;
+    submission.resources_ = nullptr;
 }
 
 void VulkanContext::destroy(VulkanSemaphore& semaphore) noexcept {
@@ -1178,7 +1333,7 @@ void VulkanContext::destroy(VulkanSemaphore& semaphore) noexcept {
 }
 
 void VulkanContext::recycle_or_destroy(
-    DeferredBuffer buffer) noexcept {
+    VulkanDeferredBuffer buffer) noexcept {
     constexpr VkDeviceSize maximum_device_pool_bytes =
         VkDeviceSize{2} * 1024 * 1024 * 1024;
     constexpr VkDeviceSize maximum_host_pool_bytes =

@@ -1,17 +1,265 @@
 #include "executor.h"
 #include "encoder.h"
 #include "dpt.h"
+#include "gpu_preprocess.h"
 #include "gpu_model.h"
+#include "image.h"
 #include "model.h"
 #include "operators.h"
 #include "vulkan.h"
 
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+#endif
 
 namespace dav2 {
 namespace {
+
+#if defined(_WIN32)
+using Microsoft::WRL::ComPtr;
+
+struct GpuSlot {
+    std::atomic<bool> occupied{false};
+};
+
+void check_hresult(HRESULT result, const char* operation) {
+    if (FAILED(result)) {
+        throw std::runtime_error(
+            std::string(operation) + " failed with HRESULT " +
+            std::to_string(static_cast<long>(result)));
+    }
+}
+
+ComPtr<ID3D12Device> matching_d3d12_device(
+    std::uint64_t adapter_luid) {
+    if (adapter_luid == 0) return {};
+    ComPtr<IDXGIFactory6> factory;
+    check_hresult(
+        CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)),
+        "CreateDXGIFactory2");
+    for (UINT index = 0;; ++index) {
+        ComPtr<IDXGIAdapter1> adapter;
+        const HRESULT enumerated =
+            factory->EnumAdapters1(index, &adapter);
+        if (enumerated == DXGI_ERROR_NOT_FOUND) break;
+        check_hresult(enumerated, "EnumAdapters1");
+        DXGI_ADAPTER_DESC1 description{};
+        check_hresult(
+            adapter->GetDesc1(&description),
+            "IDXGIAdapter1::GetDesc1");
+        std::uint64_t candidate = 0;
+        static_assert(
+            sizeof(candidate) == sizeof(description.AdapterLuid));
+        std::memcpy(
+            &candidate,
+            &description.AdapterLuid,
+            sizeof(candidate));
+        if (candidate != adapter_luid) continue;
+        ComPtr<ID3D12Device> device;
+        check_hresult(
+            D3D12CreateDevice(
+                adapter.Get(),
+                D3D_FEATURE_LEVEL_11_0,
+                IID_PPV_ARGS(&device)),
+            "D3D12CreateDevice");
+        return device;
+    }
+    return {};
+}
+
+struct SharedD3D12Output {
+    ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Fence> fence;
+    HANDLE resource_handle = nullptr;
+    HANDLE fence_handle = nullptr;
+
+    SharedD3D12Output() = default;
+    SharedD3D12Output(const SharedD3D12Output&) = delete;
+    SharedD3D12Output& operator=(const SharedD3D12Output&) = delete;
+    SharedD3D12Output(SharedD3D12Output&& other) noexcept
+        : resource(std::move(other.resource)),
+          fence(std::move(other.fence)),
+          resource_handle(
+              std::exchange(other.resource_handle, nullptr)),
+          fence_handle(
+              std::exchange(other.fence_handle, nullptr)) {}
+
+    ~SharedD3D12Output() {
+        if (resource_handle != nullptr) CloseHandle(resource_handle);
+        if (fence_handle != nullptr) CloseHandle(fence_handle);
+    }
+};
+
+SharedD3D12Output create_shared_output(
+    ID3D12Device* device,
+    std::uint64_t bytes) {
+    const D3D12_HEAP_PROPERTIES heap{
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1,
+    };
+    const D3D12_RESOURCE_DESC description{
+        D3D12_RESOURCE_DIMENSION_BUFFER,
+        0,
+        bytes,
+        1,
+        1,
+        1,
+        DXGI_FORMAT_UNKNOWN,
+        {1, 0},
+        D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        D3D12_RESOURCE_FLAG_NONE,
+    };
+    SharedD3D12Output result;
+    check_hresult(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_SHARED,
+            &description,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(&result.resource)),
+        "CreateCommittedResource(DAV2 output)");
+    check_hresult(
+        device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(&result.fence)),
+        "CreateFence(DAV2 output)");
+    check_hresult(
+        device->CreateSharedHandle(
+            result.resource.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.resource_handle),
+        "CreateSharedHandle(DAV2 output)");
+    check_hresult(
+        device->CreateSharedHandle(
+            result.fence.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.fence_handle),
+        "CreateSharedHandle(DAV2 output fence)");
+    return result;
+}
+
+GpuCapabilities d3d12_capabilities(
+    const VulkanContext& context,
+    ID3D12Device* device) {
+    GpuCapabilities result;
+    const VulkanExternalCapabilities& external =
+        context.external_capabilities();
+    if (external.d3d12_resource_import &&
+        external.d3d12_fence_import &&
+        device != nullptr) {
+        result.flags =
+            DAV2_GPU_CAP_D3D12_SHARED_INPUT |
+            DAV2_GPU_CAP_D3D12_FENCE_WAIT |
+            DAV2_GPU_CAP_D3D12_SHARED_OUTPUT |
+            DAV2_GPU_CAP_D3D12_FENCE_SIGNAL |
+            DAV2_GPU_CAP_ASYNC_SUBMIT |
+            DAV2_GPU_CAP_CANCELLATION |
+            DAV2_GPU_CAP_NO_HOST_PIXEL_STAGING |
+            DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING;
+        result.adapter_luid = context.adapter_luid();
+        result.maximum_in_flight_jobs = 1;
+    }
+    return result;
+}
+
+class VulkanGpuJob final : public GpuJob {
+public:
+    VulkanGpuJob(
+        std::shared_ptr<GpuSlot> slot,
+        SharedD3D12Output shared,
+        VulkanBuffer output,
+        VulkanSubmission submission,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint64_t source_frame_id,
+        std::uint64_t timestamp_ns)
+        : slot_(std::move(slot)),
+          shared_(std::move(shared)),
+          output_(std::move(output)),
+          submission_(std::move(submission)),
+          width_(width),
+          height_(height),
+          source_frame_id_(source_frame_id),
+          timestamp_ns_(timestamp_ns) {}
+
+    ~VulkanGpuJob() override {
+        try {
+            submission_.wait();
+        } catch (...) {
+        }
+        slot_->occupied.store(false, std::memory_order_release);
+    }
+
+    dav2_gpu_job_state state() const override {
+        if (cancelled_.load(std::memory_order_acquire)) {
+            return DAV2_GPU_JOB_CANCELLED;
+        }
+        return submission_.ready()
+            ? DAV2_GPU_JOB_COMPLETE
+            : DAV2_GPU_JOB_RUNNING;
+    }
+
+    void cancel() override {
+        cancelled_.store(true, std::memory_order_release);
+    }
+
+    GpuOutput output() const override {
+        if (cancelled_.load(std::memory_order_acquire)) {
+            throw std::runtime_error("GPU job was cancelled");
+        }
+        GpuOutput result;
+        result.width = width_;
+        result.height = height_;
+        result.row_stride_bytes = width_ * sizeof(float);
+        result.byte_size =
+            static_cast<std::uint64_t>(result.row_stride_bytes) * height_;
+        result.shared_resource_handle =
+            reinterpret_cast<std::uintptr_t>(
+                shared_.resource_handle);
+        result.ready_fence_handle =
+            reinterpret_cast<std::uintptr_t>(
+                shared_.fence_handle);
+        result.ready_fence_value = 1;
+        result.source_frame_id = source_frame_id_;
+        result.timestamp_ns = timestamp_ns_;
+        return result;
+    }
+
+private:
+    std::shared_ptr<GpuSlot> slot_;
+    // D3D12 ownership outlives the imported Vulkan buffer. Destruction is in
+    // reverse order: submission wait, Vulkan import, then D3D12 objects.
+    SharedD3D12Output shared_;
+    VulkanBuffer output_;
+    VulkanSubmission submission_;
+    std::uint32_t width_ = 0;
+    std::uint32_t height_ = 0;
+    std::uint64_t source_frame_id_ = 0;
+    std::uint64_t timestamp_ns_ = 0;
+    std::atomic<bool> cancelled_{false};
+};
+#endif
 
 class VulkanExecutor final : public Executor {
 public:
@@ -23,8 +271,15 @@ public:
           context_(static_cast<std::uint32_t>(vulkan_device_index)),
           weights_(model_, context_),
           operators_(context_),
+          preprocessor_(context_),
           encoder_(encoder, context_, weights_, operators_),
-          dpt_(encoder, context_, weights_, operators_) {}
+          dpt_(encoder, context_, weights_, operators_)
+#if defined(_WIN32)
+          , gpu_slot_(std::make_shared<GpuSlot>()),
+          d3d12_device_(
+              matching_d3d12_device(context_.adapter_luid()))
+#endif
+          {}
 
     void infer(const float* input, int width, int height, float* output) override {
         infer_resized(input, width, height, output, width, height);
@@ -69,13 +324,159 @@ public:
                 output_height * sizeof(float));
     }
 
+    GpuCapabilities gpu_capabilities() const override {
+#if defined(_WIN32)
+        return d3d12_capabilities(
+            context_, d3d12_device_.Get());
+#else
+        return {};
+#endif
+    }
+
+    std::unique_ptr<GpuJob> submit_gpu(
+        const GpuSubmitRequest& request) override {
+#if !defined(_WIN32)
+        (void)request;
+        throw std::runtime_error(
+            "D3D12 GPU submission is only available on Windows");
+#else
+        const GpuCapabilities capabilities = gpu_capabilities();
+        if (capabilities.flags == 0) {
+            throw std::runtime_error(
+                "complete D3D12/Vulkan GPU interop is unavailable");
+        }
+        if (request.width == 0 || request.height == 0 ||
+            request.row_stride_bytes < request.width * 4u ||
+            request.shared_resource_handle == 0 ||
+            request.wait_fence_handle == 0 ||
+            (request.pixel_format != DAV2_GPU_PIXEL_BGRA8 &&
+             request.pixel_format != DAV2_GPU_PIXEL_RGBA8)) {
+            throw std::invalid_argument(
+                "invalid D3D12 GPU inference request");
+        }
+        const std::uint64_t required_input =
+            static_cast<std::uint64_t>(request.row_stride_bytes) *
+            request.height;
+        if (required_input > request.resource_byte_size ||
+            request.width >
+                static_cast<std::uint32_t>(
+                    std::numeric_limits<std::int32_t>::max()) ||
+            request.height >
+                static_cast<std::uint32_t>(
+                    std::numeric_limits<std::int32_t>::max())) {
+            throw std::invalid_argument(
+                "D3D12 GPU input dimensions exceed the resource");
+        }
+        bool expected = false;
+        if (!gpu_slot_->occupied.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            throw std::runtime_error(
+                "DAV2 supports one live GPU job per context");
+        }
+        try {
+            const ImageShape shape = network_shape(
+                static_cast<int>(request.width),
+                static_cast<int>(request.height),
+                request.input_size);
+            const std::uint64_t output_bytes =
+                static_cast<std::uint64_t>(request.width) *
+                request.height * sizeof(float);
+            SharedD3D12Output shared =
+                create_shared_output(
+                    d3d12_device_.Get(), output_bytes);
+            VulkanBuffer output =
+                context_.import_d3d12_buffer(
+                    shared.resource_handle, output_bytes);
+            VulkanSemaphore wait = context_.import_d3d12_fence(
+                reinterpret_cast<void*>(
+                    request.wait_fence_handle),
+                request.wait_fence_value);
+            VulkanSemaphore signal = context_.import_d3d12_fence(
+                shared.fence_handle, 1);
+            VulkanSubmission submission = context_.batch_async(
+                std::move(wait),
+                std::move(signal),
+                [&] {
+                    VulkanBuffer source =
+                        context_.import_d3d12_buffer(
+                            reinterpret_cast<void*>(
+                                request.shared_resource_handle),
+                            request.resource_byte_size);
+                    VulkanBuffer image =
+                        context_.create_device_buffer(
+                            static_cast<std::uint64_t>(
+                                shape.width) *
+                            shape.height * 3u * sizeof(float));
+                    context_.acquire_external_buffer(
+                        source, VK_ACCESS_SHADER_READ_BIT);
+                    context_.acquire_external_buffer(
+                        output, VK_ACCESS_SHADER_WRITE_BIT);
+                    preprocessor_.run(
+                        image,
+                        source,
+                        request.width,
+                        request.height,
+                        request.row_stride_bytes,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height),
+                        request.pixel_format ==
+                                DAV2_GPU_PIXEL_BGRA8
+                            ? GpuPixelOrder::bgra
+                            : GpuPixelOrder::rgba);
+                    EncoderOutput encoded = encoder_.forward(
+                        image,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height));
+                    FeatureMap depth =
+                        dpt_.forward(std::move(encoded));
+                    operators_.bilinear_align_true(
+                        output,
+                        depth.buffer,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height),
+                        request.width,
+                        request.height,
+                        1);
+                    context_.release_external_buffer(
+                        source, VK_ACCESS_SHADER_READ_BIT);
+                    context_.release_external_buffer(
+                        output, VK_ACCESS_SHADER_WRITE_BIT);
+                });
+            return std::make_unique<VulkanGpuJob>(
+                gpu_slot_,
+                std::move(shared),
+                std::move(output),
+                std::move(submission),
+                request.width,
+                request.height,
+                request.source_frame_id,
+                request.timestamp_ns);
+        } catch (...) {
+            gpu_slot_->occupied.store(
+                false, std::memory_order_release);
+            throw;
+        }
+#endif
+    }
+
+    void transfer_counters(
+        std::uint64_t& upload_bytes,
+        std::uint64_t& download_bytes) const override {
+        context_.transfer_counters(upload_bytes, download_bytes);
+    }
+
 private:
     ModelFile model_;
     VulkanContext context_;
     GpuModel weights_;
     VulkanOperators operators_;
+    GpuPreprocessor preprocessor_;
     DinoEncoder encoder_;
     DptHead dpt_;
+#if defined(_WIN32)
+    std::shared_ptr<GpuSlot> gpu_slot_;
+    ComPtr<ID3D12Device> d3d12_device_;
+#endif
 };
 
 }  // namespace
@@ -89,6 +490,23 @@ std::unique_ptr<Executor> create_executor(
     }
     return std::make_unique<VulkanExecutor>(
         model_path, encoder, vulkan_device_index);
+}
+
+GpuCapabilities probe_gpu_capabilities(
+    int vulkan_device_index) {
+    if (vulkan_device_index < 0) {
+        throw std::invalid_argument(
+            "vulkan_device_index must be non-negative");
+    }
+#if defined(_WIN32)
+    VulkanContext context(
+        static_cast<std::uint32_t>(vulkan_device_index));
+    ComPtr<ID3D12Device> device =
+        matching_d3d12_device(context.adapter_luid());
+    return d3d12_capabilities(context, device.Get());
+#else
+    return {};
+#endif
 }
 
 }  // namespace dav2

@@ -127,23 +127,48 @@ offset, and older readers ignore the new offset and padding. The official
 PyTorch checkpoint remains the canonical artifact; `.dav2` is a derived,
 content-addressed representation rather than a second model identity.
 
-## External GPU resource foundation
+## External GPU inference
 
 The internal Windows Vulkan layer probes external D3D12 resource and fence
-import support on the selected physical device. When both capabilities are
-available it can:
+import support on the selected physical device and matches that device to a
+D3D12 adapter by LUID. When both imports and the matching D3D12 device are
+available, the public additive GPU ABI can:
 
 - duplicate and import a shared D3D12 buffer as dedicated Vulkan memory;
 - duplicate and import a shared D3D12 fence as a Vulkan semaphore with an
   explicit wait value;
 - resize BGRA8 or RGBA8 buffers with bicubic filtering and normalize directly
-  into device-local planar RGB FP32.
+  into device-local planar RGB FP32;
+- record preprocessing, the full DINOv2 encoder, the DPT head, and final
+  source-size resize into one asynchronous Vulkan command batch;
+- allocate a shared D3D12 depth buffer and fence, import both into Vulkan,
+  write row-major float32 depth, and signal the explicit fence value without
+  queue-idle waits or host readback;
+- perform explicit external-to-compute and compute-to-external Vulkan queue
+  family ownership transfers for both shared buffers.
 
-These primitives are not yet part of the public C ABI and must not be
-advertised as an end-to-end GPU inference capability. The remaining gate is to
-retain the imported input and intermediate graph resources through an
-asynchronous inference submission, export the device-resident depth result and
-completion synchronization, and tie both to an explicit output lease.
+The AMD RX 9070 driver supports D3D12-to-Vulkan resource and fence import but
+does not expose the inverse Vulkan export capabilities. DAV2 therefore creates
+the output resource and fence with D3D12 and imports them into Vulkan. This is
+still a single physical GPU allocation and does not stage pixels or depth
+through host memory.
+
+`dav2_submit_d3d12` duplicates/imports the caller's borrowed resource and fence
+handles before returning. Jobs retain every descriptor set, intermediate
+buffer, imported semaphore, command buffer, and completion fence until the
+submission completes. An acquired output descriptor contains borrowed shared
+D3D12 buffer/fence handles which remain valid through the explicit output
+lease. Releasing a job handle does not invalidate a live lease. Cancellation
+does not attempt unsafe command-buffer preemption: it makes the output
+unavailable and retained resources are reclaimed after the submitted fence
+completes. One live GPU job is currently allowed per context.
+
+Capability flags are returned only when the complete input, graph, output, and
+synchronization path is available. `dav2_probe_gpu_capabilities` performs the
+same truthful device probe without loading model weights, so a harness can
+answer its pre-runtime capability query. The transfer counters cover tensor
+upload/download staging and are used by the hardware test to prove that a GPU
+submission performs neither.
 
 ## Native ABI
 
@@ -153,6 +178,10 @@ The exported surface is deliberately small:
 - calculate the aspect-preserving network shape;
 - infer from interleaved BGR8 with Python-compatible preprocessing;
 - infer directly from normalized RGB CHW float32;
+- query the complete D3D12/Vulkan interop capability;
+- asynchronously submit shared D3D12 BGRA8/RGBA8 buffers with a shared-fence
+  wait, poll/cancel the correlated job, and acquire/release a shared D3D12
+  float32 depth output lease;
 - obtain stable status strings and a thread-local detailed error.
 
 Every input dimension is checked before allocation or dispatch. Network tensor
