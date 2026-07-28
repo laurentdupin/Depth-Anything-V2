@@ -1,0 +1,6 @@
+/build*/
+/checkpoints/
+/models/
+/validation/
+*.pdb
+*.ilk
