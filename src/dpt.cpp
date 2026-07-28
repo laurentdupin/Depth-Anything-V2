@@ -95,7 +95,8 @@ FeatureMap DptHead::conv(
         kernel,
         stride,
         padding,
-        has_bias);
+        has_bias,
+        features_ >= 256);
     return output;
 }
 

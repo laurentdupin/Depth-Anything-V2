@@ -6,6 +6,7 @@
 #include "bilinear_align_true_spv.h"
 #include "bmm_spv.h"
 #include "conv2d_spv.h"
+#include "conv2d8_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
@@ -87,6 +88,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           16)),
       conv2d_(context.create_pipeline(
           dav2_conv2d_spv, dav2_conv2d_spv_size, 4, 40)),
+      conv2d8_(context.create_pipeline(
+          dav2_conv2d8_spv, dav2_conv2d8_spv_size, 4, 40)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dav2_conv_transpose_nonoverlap_spv,
           dav2_conv_transpose_nonoverlap_spv_size,
@@ -450,7 +453,8 @@ void VulkanOperators::conv2d(
     std::uint32_t kernel,
     std::uint32_t stride,
     std::uint32_t padding,
-    bool has_bias) {
+    bool has_bias,
+    bool block8) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0 || stride == 0 ||
         input_width + 2 * padding < kernel ||
@@ -492,13 +496,13 @@ void VulkanOperators::conv2d(
         has_bias ? 1u : 0u,
     };
     context_.dispatch(
-        conv2d_,
+        block8 ? conv2d8_ : conv2d_,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
         divide_up(output_width, 8),
         divide_up(output_height, 8),
-        divide_up(output_channels, 4));
+        divide_up(output_channels, block8 ? 8 : 4));
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(

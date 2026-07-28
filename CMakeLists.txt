@@ -31,7 +31,10 @@ if(DAV2_WITH_VULKAN)
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
                 -o "${SPIRV}" "${SOURCE}"
-            DEPENDS "${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
+            DEPENDS
+                "${SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
             VERBATIM
         )
         add_custom_command(
@@ -60,6 +63,7 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(softmax_lastdim)
     dav2_compile_shader(project_tokens)
     dav2_compile_shader(conv2d)
+    dav2_compile_shader(conv2d8)
     dav2_compile_shader(conv_transpose_nonoverlap)
     dav2_compile_shader(bilinear_align_true)
     dav2_compile_shader(relu)
