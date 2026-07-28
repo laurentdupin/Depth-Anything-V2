@@ -24,6 +24,47 @@ void VulkanContext::check(VkResult result, const char* operation) {
     }
 }
 
+VulkanSubmission::VulkanSubmission(VulkanSubmission&& other) noexcept {
+    *this = std::move(other);
+}
+
+VulkanSubmission& VulkanSubmission::operator=(
+    VulkanSubmission&& other) noexcept {
+    if (this != &other) {
+        if (owner_) owner_->destroy(*this);
+        owner_ = std::exchange(other.owner_, nullptr);
+        command_ = std::exchange(other.command_, VK_NULL_HANDLE);
+        fence_ = std::exchange(other.fence_, VK_NULL_HANDLE);
+    }
+    return *this;
+}
+
+VulkanSubmission::~VulkanSubmission() {
+    if (owner_) owner_->destroy(*this);
+}
+
+bool VulkanSubmission::ready() const {
+    if (owner_ == nullptr || fence_ == VK_NULL_HANDLE) {
+        throw std::logic_error("invalid Vulkan submission");
+    }
+    const VkResult result =
+        vkGetFenceStatus(owner_->device_, fence_);
+    if (result == VK_SUCCESS) return true;
+    if (result == VK_NOT_READY) return false;
+    VulkanContext::check(result, "vkGetFenceStatus");
+    return false;
+}
+
+void VulkanSubmission::wait() const {
+    if (owner_ == nullptr || fence_ == VK_NULL_HANDLE) {
+        throw std::logic_error("invalid Vulkan submission");
+    }
+    VulkanContext::check(
+        vkWaitForFences(
+            owner_->device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+        "vkWaitForFences");
+}
+
 VulkanBuffer::VulkanBuffer(VulkanBuffer&& other) noexcept {
     *this = std::move(other);
 }
@@ -386,7 +427,32 @@ VkCommandBuffer VulkanContext::begin_commands() {
 }
 
 void VulkanContext::end_commands(VkCommandBuffer command) {
-    check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
+    VulkanSubmission submission = submit_commands(command);
+    submission.wait();
+}
+
+VulkanSubmission VulkanContext::submit_commands(
+    VkCommandBuffer command) {
+    try {
+        check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
+    } catch (...) {
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+        throw;
+    }
+    VkFence fence = VK_NULL_HANDLE;
+    const VkFenceCreateInfo fence_info{
+        VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        nullptr,
+        0,
+    };
+    try {
+        check(
+            vkCreateFence(device_, &fence_info, nullptr, &fence),
+            "vkCreateFence");
+    } catch (...) {
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+        throw;
+    }
     const VkSubmitInfo submit{
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
@@ -398,9 +464,18 @@ void VulkanContext::end_commands(VkCommandBuffer command) {
         0,
         nullptr,
     };
-    check(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
-    check(vkQueueWaitIdle(queue_), "vkQueueWaitIdle");
-    vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+    const VkResult submitted =
+        vkQueueSubmit(queue_, 1, &submit, fence);
+    if (submitted != VK_SUCCESS) {
+        vkDestroyFence(device_, fence, nullptr);
+        vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+        check(submitted, "vkQueueSubmit");
+    }
+    VulkanSubmission result;
+    result.owner_ = this;
+    result.command_ = command;
+    result.fence_ = fence;
+    return result;
 }
 
 void VulkanContext::begin_batch() {
@@ -751,6 +826,21 @@ void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
     buffer.mapped_ = nullptr;
     buffer.size_ = 0;
     buffer.cacheable_ = false;
+}
+
+void VulkanContext::destroy(VulkanSubmission& submission) noexcept {
+    if (submission.fence_ != VK_NULL_HANDLE) {
+        (void)vkWaitForFences(
+            device_, 1, &submission.fence_, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device_, submission.fence_, nullptr);
+    }
+    if (submission.command_ != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(
+            device_, command_pool_, 1, &submission.command_);
+    }
+    submission.owner_ = nullptr;
+    submission.command_ = VK_NULL_HANDLE;
+    submission.fence_ = VK_NULL_HANDLE;
 }
 
 void VulkanContext::recycle_or_destroy(

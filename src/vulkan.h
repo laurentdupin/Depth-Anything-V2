@@ -12,6 +12,25 @@ namespace dav2 {
 
 class VulkanContext;
 
+class VulkanSubmission {
+public:
+    VulkanSubmission() = default;
+    VulkanSubmission(VulkanSubmission&& other) noexcept;
+    VulkanSubmission& operator=(VulkanSubmission&& other) noexcept;
+    VulkanSubmission(const VulkanSubmission&) = delete;
+    VulkanSubmission& operator=(const VulkanSubmission&) = delete;
+    ~VulkanSubmission();
+
+    bool ready() const;
+    void wait() const;
+
+private:
+    friend class VulkanContext;
+    VulkanContext* owner_ = nullptr;
+    VkCommandBuffer command_ = VK_NULL_HANDLE;
+    VkFence fence_ = VK_NULL_HANDLE;
+};
+
 class VulkanBuffer {
 public:
     VulkanBuffer() = default;
@@ -113,6 +132,7 @@ public:
     }
 
 private:
+    friend class VulkanSubmission;
     friend class VulkanBuffer;
     friend class VulkanPipeline;
     struct DeferredBuffer;
@@ -129,12 +149,14 @@ private:
         VkBuffer destination,
         VkDeviceSize bytes);
     VkCommandBuffer begin_commands();
+    VulkanSubmission submit_commands(VkCommandBuffer command_buffer);
     void end_commands(VkCommandBuffer command_buffer);
     void begin_batch();
     void end_batch();
     void cancel_batch() noexcept;
     void release_batch_resources() noexcept;
     void recycle_or_destroy(DeferredBuffer buffer) noexcept;
+    void destroy(VulkanSubmission& submission) noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
     void release() noexcept;
