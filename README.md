@@ -44,6 +44,67 @@ We provide **four models** of varying scales for robust relative depth estimatio
 
 ## Usage
 
+### Standalone C/Vulkan runtime
+
+This fork includes an inference-only native runtime for the relative-depth
+ViT-S, ViT-B, and ViT-L models. Deployment consists of:
+
+- `depth_anything_v2.dll`;
+- one converted `.dav2` model file;
+- `include/depth_anything_v2.h` for applications that compile against it.
+
+The DLL contains the complete DINOv2 + DPT graph, image preprocessing, tensor
+operators, and embedded Vulkan shaders. It does not load Python, PyTorch,
+OpenCV, TorchVision, an inference framework, or the Visual C++ runtime DLL.
+Its only imports are the GPU driver's `vulkan-1.dll` and Windows
+`KERNEL32.dll`.
+
+Build on Windows with a Vulkan SDK:
+
+```powershell
+cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+Convert an official checkpoint once on a development machine:
+
+```powershell
+python tools/export_model.py --encoder vits `
+  --checkpoint checkpoints/depth_anything_v2_vits.pth `
+  --output models/depth_anything_v2_vits.dav2
+```
+
+The exporter uses PyTorch only to read the original `.pth`; neither it nor
+Python is part of deployment. Substitute `vitb` or `vitl` for the other
+variants.
+
+Minimal C setup:
+
+```c
+#include "depth_anything_v2.h"
+
+dav2_create_options options = {
+    sizeof(options), DAV2_ABI_VERSION, DAV2_ENCODER_VITS, 0, 0
+};
+dav2_context *context = NULL;
+dav2_status status =
+    dav2_create("depth_anything_v2_vits.dav2", &options, &context);
+
+/* bgr is an OpenCV-compatible interleaved BGR8 image. */
+if (status == DAV2_STATUS_OK) {
+    status = dav2_infer_bgr8(
+        context, bgr, width, height, row_stride, 518,
+        depth, (size_t)width * height);
+}
+dav2_destroy(context);
+```
+
+`dav2_infer_tensor_f32` is also available for normalized planar RGB data when
+the caller owns preprocessing. See
+[`include/depth_anything_v2.h`](include/depth_anything_v2.h) and
+[`docs/architecture.md`](docs/architecture.md) for the full contract.
+
 ### Prepraration
 
 ```bash

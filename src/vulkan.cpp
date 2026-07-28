@@ -66,7 +66,7 @@ VulkanPipeline::~VulkanPipeline() {
     if (owner_) owner_->destroy(*this);
 }
 
-VulkanContext::VulkanContext(std::uint32_t device_index) {
+VulkanContext::VulkanContext(std::uint32_t device_index) try {
     const VkApplicationInfo application{
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
         nullptr,
@@ -178,9 +178,16 @@ VulkanContext::VulkanContext(std::uint32_t device_index) {
         vkCreateDescriptorPool(
             device_, &descriptor_pool_info, nullptr, &descriptor_pool_),
         "vkCreateDescriptorPool");
+} catch (...) {
+    release();
+    throw;
 }
 
 VulkanContext::~VulkanContext() {
+    release();
+}
+
+void VulkanContext::release() noexcept {
     if (device_) {
         vkDeviceWaitIdle(device_);
         if (descriptor_pool_) {
@@ -190,9 +197,13 @@ VulkanContext::~VulkanContext() {
             vkDestroyCommandPool(device_, command_pool_, nullptr);
         }
         vkDestroyDevice(device_, nullptr);
+        device_ = VK_NULL_HANDLE;
+        descriptor_pool_ = VK_NULL_HANDLE;
+        command_pool_ = VK_NULL_HANDLE;
     }
     if (instance_) {
         vkDestroyInstance(instance_, nullptr);
+        instance_ = VK_NULL_HANDLE;
     }
 }
 
@@ -274,7 +285,18 @@ VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+}
+
+void VulkanContext::write_host(
+    VulkanBuffer& destination,
+    const void* data,
+    std::size_t bytes) {
+    if (destination.owner_ != this || destination.mapped_ == nullptr ||
+        data == nullptr || bytes > destination.size_) {
+        throw std::invalid_argument("invalid Vulkan host write");
+    }
+    std::memcpy(destination.mapped_, data, bytes);
 }
 
 VkCommandBuffer VulkanContext::begin_commands() {

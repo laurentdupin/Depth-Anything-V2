@@ -62,6 +62,10 @@ public:
 
     VulkanBuffer create_device_buffer(VkDeviceSize bytes);
     VulkanBuffer create_host_buffer(VkDeviceSize bytes);
+    void write_host(
+        VulkanBuffer& destination,
+        const void* data,
+        std::size_t bytes);
     void upload(VulkanBuffer& destination, const void* data, std::size_t bytes);
     void download(
         const VulkanBuffer& source,
@@ -107,6 +111,7 @@ private:
     void end_commands(VkCommandBuffer command_buffer);
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
+    void release() noexcept;
     static void check(VkResult result, const char* operation);
 
     VkInstance instance_ = VK_NULL_HANDLE;

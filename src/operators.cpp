@@ -431,11 +431,11 @@ void VulkanOperators::prepare_tokens(
         context_.create_host_buffer(sizeof(input_metadata));
     VulkanBuffer position_block_buffer =
         context_.create_host_buffer(sizeof(position_block));
-    context_.upload(
+    context_.write_host(
         output_metadata_buffer, &output_metadata, sizeof(output_metadata));
-    context_.upload(
+    context_.write_host(
         input_metadata_buffer, &input_metadata, sizeof(input_metadata));
-    context_.upload(
+    context_.write_host(
         position_block_buffer, &position_block, sizeof(position_block));
     context_.dispatch(
         position_bicubic_,
