@@ -31,6 +31,7 @@ private:
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkDeviceSize size_ = 0;
     void* mapped_ = nullptr;
+    bool cacheable_ = false;
 };
 
 class VulkanPipeline {
@@ -113,6 +114,7 @@ public:
 private:
     friend class VulkanBuffer;
     friend class VulkanPipeline;
+    struct DeferredBuffer;
 
     std::uint32_t find_memory_type(
         std::uint32_t type_bits,
@@ -131,6 +133,7 @@ private:
     void end_batch();
     void cancel_batch() noexcept;
     void release_batch_resources() noexcept;
+    void recycle_or_destroy(DeferredBuffer buffer) noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
     void release() noexcept;
@@ -148,6 +151,8 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         void* mapped = nullptr;
+        VkDeviceSize size = 0;
+        bool cacheable = false;
     };
     struct BatchedDescriptor {
         VulkanPipeline* pipeline = nullptr;
@@ -157,6 +162,8 @@ private:
     bool batch_has_dispatch_ = false;
     std::vector<BatchedDescriptor> batch_descriptor_sets_;
     std::vector<DeferredBuffer> batch_deferred_buffers_;
+    std::vector<DeferredBuffer> device_buffer_pool_;
+    VkDeviceSize pooled_device_bytes_ = 0;
     std::string device_name_;
 };
 

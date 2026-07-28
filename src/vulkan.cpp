@@ -36,6 +36,7 @@ VulkanBuffer& VulkanBuffer::operator=(VulkanBuffer&& other) noexcept {
         memory_ = std::exchange(other.memory_, VK_NULL_HANDLE);
         size_ = std::exchange(other.size_, 0);
         mapped_ = std::exchange(other.mapped_, nullptr);
+        cacheable_ = std::exchange(other.cacheable_, false);
     }
     return *this;
 }
@@ -193,6 +194,12 @@ void VulkanContext::release() noexcept {
     if (device_) {
         vkDeviceWaitIdle(device_);
         cancel_batch();
+        for (DeferredBuffer& buffer : device_buffer_pool_) {
+            buffer.cacheable = false;
+            recycle_or_destroy(buffer);
+        }
+        device_buffer_pool_.clear();
+        pooled_device_bytes_ = 0;
         if (descriptor_pool_) {
             vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         }
@@ -272,12 +279,36 @@ VulkanBuffer VulkanContext::create_buffer(
 }
 
 VulkanBuffer VulkanContext::create_device_buffer(VkDeviceSize bytes) {
-    return create_buffer(
+    auto best = device_buffer_pool_.end();
+    for (auto candidate = device_buffer_pool_.begin();
+         candidate != device_buffer_pool_.end();
+         ++candidate) {
+        if (candidate->size >= bytes &&
+            (best == device_buffer_pool_.end() ||
+             candidate->size < best->size)) {
+            best = candidate;
+        }
+    }
+    if (best != device_buffer_pool_.end()) {
+        VulkanBuffer result;
+        result.owner_ = this;
+        result.buffer_ = best->buffer;
+        result.memory_ = best->memory;
+        result.size_ = best->size;
+        result.mapped_ = nullptr;
+        result.cacheable_ = true;
+        pooled_device_bytes_ -= best->size;
+        device_buffer_pool_.erase(best);
+        return result;
+    }
+    VulkanBuffer result = create_buffer(
         bytes,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    result.cacheable_ = true;
+    return result;
 }
 
 VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
@@ -360,15 +391,7 @@ void VulkanContext::release_batch_resources() noexcept {
     }
     batch_descriptor_sets_.clear();
     for (const DeferredBuffer& buffer : batch_deferred_buffers_) {
-        if (buffer.mapped) {
-            vkUnmapMemory(device_, buffer.memory);
-        }
-        if (buffer.buffer) {
-            vkDestroyBuffer(device_, buffer.buffer, nullptr);
-        }
-        if (buffer.memory) {
-            vkFreeMemory(device_, buffer.memory, nullptr);
-        }
+        recycle_or_destroy(buffer);
     }
     batch_deferred_buffers_.clear();
 }
@@ -669,28 +692,56 @@ void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
         (buffer.buffer_ != VK_NULL_HANDLE ||
          buffer.memory_ != VK_NULL_HANDLE)) {
         batch_deferred_buffers_.push_back(
-            {buffer.buffer_, buffer.memory_, buffer.mapped_});
+            {
+                buffer.buffer_,
+                buffer.memory_,
+                buffer.mapped_,
+                buffer.size_,
+                buffer.cacheable_,
+            });
         buffer.owner_ = nullptr;
         buffer.buffer_ = VK_NULL_HANDLE;
         buffer.memory_ = VK_NULL_HANDLE;
         buffer.mapped_ = nullptr;
         buffer.size_ = 0;
+        buffer.cacheable_ = false;
         return;
     }
-    if (buffer.mapped_) {
-        vkUnmapMemory(device_, buffer.memory_);
-    }
-    if (buffer.buffer_) {
-        vkDestroyBuffer(device_, buffer.buffer_, nullptr);
-    }
-    if (buffer.memory_) {
-        vkFreeMemory(device_, buffer.memory_, nullptr);
-    }
+    recycle_or_destroy(
+        {
+            buffer.buffer_,
+            buffer.memory_,
+            buffer.mapped_,
+            buffer.size_,
+            buffer.cacheable_,
+        });
     buffer.owner_ = nullptr;
     buffer.buffer_ = VK_NULL_HANDLE;
     buffer.memory_ = VK_NULL_HANDLE;
     buffer.mapped_ = nullptr;
     buffer.size_ = 0;
+    buffer.cacheable_ = false;
+}
+
+void VulkanContext::recycle_or_destroy(
+    DeferredBuffer buffer) noexcept {
+    constexpr VkDeviceSize maximum_pool_bytes =
+        VkDeviceSize{2} * 1024 * 1024 * 1024;
+    if (buffer.cacheable && buffer.buffer && buffer.memory &&
+        buffer.size <= maximum_pool_bytes - pooled_device_bytes_) {
+        pooled_device_bytes_ += buffer.size;
+        device_buffer_pool_.push_back(buffer);
+        return;
+    }
+    if (buffer.mapped) {
+        vkUnmapMemory(device_, buffer.memory);
+    }
+    if (buffer.buffer) {
+        vkDestroyBuffer(device_, buffer.buffer, nullptr);
+    }
+    if (buffer.memory) {
+        vkFreeMemory(device_, buffer.memory, nullptr);
+    }
 }
 
 void VulkanContext::destroy(VulkanPipeline& pipeline) noexcept {
