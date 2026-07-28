@@ -18,6 +18,7 @@ layout(push_constant) uniform Parameters {
     uint inner;
     uint batches;
     uint weight_transposed;
+    uint output_token_major;
 } parameters;
 
 shared float input_tile[64 * 16];
@@ -105,10 +106,13 @@ void main() {
         for (uint column = 0; column < 4; ++column) {
             const uint output_column = column_base + column;
             if (output_column < parameters.columns) {
-                output_buffer.data[
-                    (batch * parameters.rows + output_row) *
-                        parameters.columns +
-                    output_column] = sums[row][column];
+                const uint output_index =
+                    parameters.output_token_major != 0
+                    ? (output_row * parameters.batches + batch) *
+                          parameters.columns + output_column
+                    : (batch * parameters.rows + output_row) *
+                          parameters.columns + output_column;
+                output_buffer.data[output_index] = sums[row][column];
             }
         }
     }

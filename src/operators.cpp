@@ -55,7 +55,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       split_qkv_(context.create_pipeline(
           dav2_split_qkv_spv, dav2_split_qkv_spv_size, 4, 16)),
       bmm_(context.create_pipeline(
-          dav2_bmm_spv, dav2_bmm_spv_size, 3, 20)),
+          dav2_bmm_spv, dav2_bmm_spv_size, 3, 24)),
       softmax_lastdim_(context.create_pipeline(
           dav2_softmax_lastdim_spv,
           dav2_softmax_lastdim_spv_size,
@@ -265,7 +265,8 @@ void VulkanOperators::attention_head64(
         std::uint32_t inner;
         std::uint32_t batches;
         std::uint32_t weight_transposed;
-    } score_parameters{tokens, tokens, 64, heads, 1};
+        std::uint32_t output_token_major;
+    } score_parameters{tokens, tokens, 64, heads, 1, 0};
     context_.dispatch(
         bmm_,
         {&scores, &query, &key},
@@ -284,7 +285,7 @@ void VulkanOperators::attention_head64(
         &softmax_parameters,
         sizeof(softmax_parameters),
         softmax_parameters.rows);
-    BmmParameters value_parameters{tokens, 64, tokens, heads, 0};
+    BmmParameters value_parameters{tokens, 64, tokens, heads, 0, 1};
     context_.dispatch(
         bmm_,
         {&output, &probabilities, &value},

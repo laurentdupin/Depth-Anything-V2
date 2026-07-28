@@ -88,7 +88,6 @@ EncoderOutput DinoEncoder::forward(
     VulkanBuffer query = context_.create_device_buffer(token_bytes);
     VulkanBuffer key = context_.create_device_buffer(token_bytes);
     VulkanBuffer value = context_.create_device_buffer(token_bytes);
-    VulkanBuffer attention = context_.create_device_buffer(token_bytes);
     VulkanBuffer qkv =
         context_.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden =
@@ -137,8 +136,7 @@ EncoderOutput DinoEncoder::forward(
             operators_.split_qkv(
                 query, key, value, qkv, tokens, heads_);
             operators_.attention_head64(
-                attention, query, key, value, tokens, heads_);
-            operators_.merge_heads(qkv, attention, tokens, heads_);
+                qkv, query, key, value, tokens, heads_);
             operators_.linear(
                 query,
                 qkv,

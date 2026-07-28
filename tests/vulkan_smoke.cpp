@@ -297,8 +297,6 @@ int main() {
         context.create_device_buffer(attention_elements * sizeof(float));
     auto gpu_attention =
         context.create_device_buffer(attention_elements * sizeof(float));
-    auto gpu_merged =
-        context.create_device_buffer(attention_elements * sizeof(float));
     context.upload(gpu_qkv, qkv.data(), qkv.size() * sizeof(float));
     operators.split_qkv(
         gpu_query,
@@ -314,14 +312,9 @@ int main() {
         gpu_value,
         attention_tokens,
         attention_heads);
-    operators.merge_heads(
-        gpu_merged,
-        gpu_attention,
-        attention_tokens,
-        attention_heads);
     std::vector<float> merged(attention_elements);
     context.download(
-        gpu_merged, merged.data(), merged.size() * sizeof(float));
+        gpu_attention, merged.data(), merged.size() * sizeof(float));
     for (std::uint32_t token = 0; token < attention_tokens; ++token) {
         for (std::uint32_t head = 0; head < attention_heads; ++head) {
             std::vector<float> scores(attention_tokens);
