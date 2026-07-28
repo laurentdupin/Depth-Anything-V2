@@ -215,8 +215,6 @@ void VulkanOperators::attention_head64(
         std::uint64_t(heads) * tokens * tokens;
     VulkanBuffer scores =
         context_.create_device_buffer(score_elements * sizeof(float));
-    VulkanBuffer probabilities =
-        context_.create_device_buffer(score_elements * sizeof(float));
     struct BmmParameters {
         std::uint32_t rows;
         std::uint32_t columns;
@@ -243,7 +241,7 @@ void VulkanOperators::attention_head64(
     } softmax_parameters{heads * tokens, tokens};
     context_.dispatch(
         softmax_lastdim_,
-        {&probabilities, &scores},
+        {&scores, &scores},
         &softmax_parameters,
         sizeof(softmax_parameters),
         softmax_parameters.rows);
@@ -251,7 +249,7 @@ void VulkanOperators::attention_head64(
         tokens, 64, tokens, heads, 0, 1, heads * 64, 0, 2};
     context_.dispatch(
         bmm_,
-        {&output, &probabilities, &qkv},
+        {&output, &scores, &qkv},
         &value_parameters,
         sizeof(value_parameters),
         divide_up(divide_up(64, 4), 8),
