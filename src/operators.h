@@ -80,7 +80,8 @@ public:
         std::uint32_t stride,
         std::uint32_t padding,
         bool has_bias,
-        bool block8 = false);
+        bool block8 = false,
+        bool half_weight = false);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -128,6 +129,8 @@ private:
     VulkanPipeline project_tokens_;
     VulkanPipeline conv2d_;
     VulkanPipeline conv2d8_;
+    VulkanPipeline conv2d_half_;
+    VulkanPipeline conv2d8_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline relu_;

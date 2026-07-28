@@ -58,6 +58,7 @@ private:
     VulkanBuffer zero_bias_;
     bool convolution_block_selected_ = false;
     bool convolution_block8_ = false;
+    bool convolution_half_weight_ = false;
 };
 
 }  // namespace dav2

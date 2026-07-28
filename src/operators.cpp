@@ -7,6 +7,8 @@
 #include "bmm_spv.h"
 #include "conv2d_spv.h"
 #include "conv2d8_spv.h"
+#include "conv2d_half_spv.h"
+#include "conv2d8_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
@@ -115,6 +117,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_conv2d_spv, dav2_conv2d_spv_size, 4, 40)),
       conv2d8_(context.create_pipeline(
           dav2_conv2d8_spv, dav2_conv2d8_spv_size, 4, 40)),
+      conv2d_half_(context.create_pipeline(
+          dav2_conv2d_half_spv, dav2_conv2d_half_spv_size, 4, 40)),
+      conv2d8_half_(context.create_pipeline(
+          dav2_conv2d8_half_spv,
+          dav2_conv2d8_half_spv_size,
+          4,
+          40)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dav2_conv_transpose_nonoverlap_spv,
           dav2_conv_transpose_nonoverlap_spv_size,
@@ -495,7 +504,8 @@ void VulkanOperators::conv2d(
     std::uint32_t stride,
     std::uint32_t padding,
     bool has_bias,
-    bool block8) {
+    bool block8,
+    bool half_weight) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0 || stride == 0 ||
         input_width + 2 * padding < kernel ||
@@ -510,10 +520,14 @@ void VulkanOperators::conv2d(
         input,
         std::uint64_t(input_width) * input_height * input_channels,
         "convolution input");
-    require_bytes(
-        weight,
-        std::uint64_t(output_channels) * input_channels * kernel * kernel,
-        "convolution weight");
+    const std::uint64_t weight_elements =
+        std::uint64_t(output_channels) * input_channels * kernel * kernel;
+    if (half_weight) {
+        require_half_elements(
+            weight, weight_elements, "convolution weight");
+    } else {
+        require_bytes(weight, weight_elements, "convolution weight");
+    }
     require_bytes(bias, has_bias ? output_channels : 1, "convolution bias");
     require_bytes(
         output,
@@ -537,7 +551,9 @@ void VulkanOperators::conv2d(
         has_bias ? 1u : 0u,
     };
     context_.dispatch(
-        block8 ? conv2d8_ : conv2d_,
+        half_weight
+            ? (block8 ? conv2d8_half_ : conv2d_half_)
+            : (block8 ? conv2d8_ : conv2d_),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),

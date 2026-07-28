@@ -6,9 +6,23 @@ layout(set = 0, binding = 0, std430) writeonly buffer Output {
 layout(set = 0, binding = 1, std430) readonly buffer Input {
     float data[];
 } input_buffer;
+#if defined(HALF_WEIGHT)
+layout(set = 0, binding = 2, std430) readonly buffer Weight {
+    uint data[];
+} weight_buffer;
+float read_weight(uint index) {
+    const vec2 values =
+        unpackHalf2x16(weight_buffer.data[index >> 1]);
+    return (index & 1) == 0 ? values.x : values.y;
+}
+#else
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
     float data[];
 } weight_buffer;
+float read_weight(uint index) {
+    return weight_buffer.data[index];
+}
+#endif
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
 } bias_buffer;
@@ -84,7 +98,7 @@ void main() {
                                 parameters.kernel +
                             kernel_x;
                         sums[output_offset] += input_value *
-                            weight_buffer.data[weight_index];
+                            read_weight(weight_index);
                     }
                 }
             }

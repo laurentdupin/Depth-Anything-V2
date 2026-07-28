@@ -11,11 +11,10 @@
 namespace dav2 {
 namespace {
 
-bool use_half_linear_weight(std::string_view name) {
-    return name.find(".attn.qkv.weight") != std::string_view::npos ||
-        name.find(".attn.proj.weight") != std::string_view::npos ||
-        name.find(".mlp.fc1.weight") != std::string_view::npos ||
-        name.find(".mlp.fc2.weight") != std::string_view::npos;
+bool use_half_weight(std::string_view name) {
+    constexpr std::string_view suffix = ".weight";
+    return name.size() >= suffix.size() &&
+        name.substr(name.size() - suffix.size()) == suffix;
 }
 
 std::uint16_t float_to_half(float input) {
@@ -118,7 +117,7 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
             source.elements,
         };
         context.upload(destination.buffer, source.data, bytes);
-        if (use_half_linear_weight(name)) {
+        if (use_half_weight(name)) {
             const auto* floats =
                 static_cast<const float*>(source.data);
             std::vector<std::uint32_t> packed(

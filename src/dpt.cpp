@@ -71,20 +71,21 @@ void DptHead::select_convolution_block() {
         elements(side, side, features_) * sizeof(float);
     VulkanBuffer input = context_.create_device_buffer(bytes);
     VulkanBuffer output = context_.create_device_buffer(bytes);
-    const VulkanBuffer& convolution_weight = weight(
-        weights_,
+    const GpuTensor& convolution_weight = weights_.tensor(
         "depth_head.scratch.refinenet4.resConfUnit2.conv1.weight");
     const VulkanBuffer& convolution_bias = weight(
         weights_,
         "depth_head.scratch.refinenet4.resConfUnit2.conv1.bias");
-    const auto run = [&](bool block8) {
+    const auto run = [&](bool block8, bool half_weight) {
         const auto start = std::chrono::steady_clock::now();
         context_.batch([&] {
             for (int repetition = 0; repetition < 3; ++repetition) {
                 operators_.conv2d(
                     output,
                     input,
-                    convolution_weight,
+                    half_weight
+                        ? convolution_weight.half_buffer
+                        : convolution_weight.buffer,
                     convolution_bias,
                     side,
                     side,
@@ -94,29 +95,68 @@ void DptHead::select_convolution_block() {
                     1,
                     1,
                     true,
-                    block8);
+                    block8,
+                    half_weight);
             }
         });
         return std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - start).count();
     };
-    run(false);
-    run(true);
-    std::array<double, 5> block4{};
-    std::array<double, 5> block8{};
-    for (std::size_t index = 0; index < block4.size(); ++index) {
-        if ((index & 1u) == 0) {
-            block4[index] = run(false);
-            block8[index] = run(true);
+    struct Candidate {
+        bool block8;
+        bool half_weight;
+        std::array<double, 3> samples{};
+    };
+    std::array<Candidate, 4> candidates{{
+        {false, false, {}},
+        {true, false, {}},
+        {false, true, {}},
+        {true, true, {}},
+    }};
+    for (Candidate& candidate : candidates) {
+        run(candidate.block8, candidate.half_weight);
+    }
+    for (std::size_t sample = 0;
+         sample < candidates[0].samples.size();
+         ++sample) {
+        if ((sample & 1u) == 0) {
+            for (Candidate& candidate : candidates) {
+                candidate.samples[sample] =
+                    run(candidate.block8, candidate.half_weight);
+            }
         } else {
-            block8[index] = run(true);
-            block4[index] = run(false);
+            for (auto candidate = candidates.rbegin();
+                 candidate != candidates.rend();
+                 ++candidate) {
+                candidate->samples[sample] =
+                    run(candidate->block8, candidate->half_weight);
+            }
         }
     }
-    std::sort(block4.begin(), block4.end());
-    std::sort(block8.begin(), block8.end());
-    convolution_block8_ =
-        block8[block8.size() / 2] < block4[block4.size() / 2];
+    Candidate* best_fp32 = nullptr;
+    Candidate* best_half = nullptr;
+    double best_fp32_time = 0.0;
+    double best_half_time = 0.0;
+    for (Candidate& candidate : candidates) {
+        std::sort(candidate.samples.begin(), candidate.samples.end());
+        const double median =
+            candidate.samples[candidate.samples.size() / 2];
+        Candidate*& best =
+            candidate.half_weight ? best_half : best_fp32;
+        double& best_time =
+            candidate.half_weight ? best_half_time : best_fp32_time;
+        if (best == nullptr || median < best_time) {
+            best = &candidate;
+            best_time = median;
+        }
+    }
+    Candidate* best =
+        features_ >= 256 &&
+            best_half_time < best_fp32_time * 0.96
+        ? best_half
+        : best_fp32;
+    convolution_block8_ = best->block8;
+    convolution_half_weight_ = best->half_weight;
     convolution_block_selected_ = true;
 }
 
@@ -141,10 +181,14 @@ FeatureMap DptHead::conv(
         output_height,
         output_channels,
     };
+    const GpuTensor& convolution_weight =
+        weights_.tensor(weight_name);
     operators_.conv2d(
         output.buffer,
         input.buffer,
-        weight(weights_, weight_name),
+        convolution_half_weight_
+            ? convolution_weight.half_buffer
+            : convolution_weight.buffer,
         has_bias ? weight(weights_, bias_name) : zero_bias_,
         input.width,
         input.height,
@@ -154,7 +198,8 @@ FeatureMap DptHead::conv(
         stride,
         padding,
         has_bias,
-        convolution_block8_);
+        convolution_block8_,
+        convolution_half_weight_);
     return output;
 }
 
