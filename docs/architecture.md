@@ -28,59 +28,50 @@ and metric-depth training/evaluation are outside the runtime boundary.
 `dav2_infer_tensor_f32` bypasses image processing so neural-network parity can
 be measured independently.
 
-On the development Vulkan device, the complete native graph is bit-identical
-to the repository's Python model running through the reference PyTorch Vulkan
-backend. This was checked for ViT-S, ViT-B, and ViT-L at both the native
-518-by-518 positional grid and a non-square 70-by-56 grid. A separate
-280-by-182 non-zero input comparison for ViT-S also had zero differing float32
-values across all 50,960 output pixels. The complete BGR8 API, including cubic
-preprocessing and the final Vulkan resize back to a non-square source image,
-was also bit-identical across all tested output pixels.
+Activations and accumulators remain FP32. At first use, representative
+workloads select convolution tiles, linear tiles, packed-FP16 weights, and
+packed-FP16 attention-score storage independently. Selection is based on
+measured performance, not adapter names or vendor IDs, and is cached per
+context (and per token count when shape changes the tradeoff). Packed values
+are unpacked before FP32 arithmetic; attention softmax and matrix
+accumulations remain FP32.
 
-Floating-point operations are not necessarily bitwise reproducible across
-different GPU architectures or driver shader compilers. Compatibility mode
-always uses FP32, preserves the reference operation order, and never enables
-reduced-precision storage or arithmetic.
+An adapter that selects only FP32 paths can remain bit-identical to the
+reference Vulkan graph. An adapter that benefits from packed storage has a
+small controlled drift. PyTorch CPU is the cross-backend accuracy authority,
+using relative L1 as the acceptance metric:
+
+`sum(abs(native - cpu)) / sum(abs(cpu))`
+
+Every tested image must remain below 1%. Maximum absolute error, MAE, and RMSE
+are reported as diagnostics, but are not normalized percentages.
 
 ### PyTorch CPU reference
 
-PyTorch CPU is the authoritative cross-backend reference because its Vulkan
-backend is experimental. The 20 photographs in `assets/examples` were tested
-at the default input size of 518 using stock PyTorch 2.13 CPU on an AMD Ryzen
-7 7800X3D and the DLL on an AMD Radeon RX 9070. The comparison covered
-52,755,986 source-resolution output pixels per model.
+PyTorch CPU is authoritative because its Vulkan backend is experimental. All
+22 repository asset images (the 20 examples, project teaser, and DA-2K poster)
+were tested at input size 518 using PyTorch 2.13 CPU and the DLL on an AMD
+Radeon RX 9070:
 
-| Encoder | Mean absolute error | RMSE | Maximum absolute error | Relative L1 error |
-|---|---:|---:|---:|---:|
-| ViT-S | 0.002086 | 0.003207 | 0.099400 | 0.1086% |
-| ViT-B | 0.003654 | 0.005631 | 0.144027 | 0.0945% |
-| ViT-L | 0.089627 | 0.142580 | 6.431381 | 0.0633% |
+| Encoder | Mean relative L1 | Worst image relative L1 | Mean MAE | Mean RMSE | Maximum absolute error |
+|---|---:|---:|---:|---:|---:|
+| ViT-S | 0.1285% | 0.3162% | 0.002696 | 0.003718 | 0.291724 |
+| ViT-B | 0.1698% | 0.3333% | 0.007092 | 0.010779 | 2.042236 |
+| ViT-L | 0.0881% | 0.1945% | 0.129391 | 0.187141 | 8.018814 |
 
-The output ranges across the suite were 0–10.24 for ViT-S, 0–20.63 for ViT-B,
-and 0–816.75 for ViT-L. CPU and GPU outputs are therefore numerically close
-but not bitwise identical. The differences come from backend-specific
-floating-point reduction and transcendental implementations and accumulate
-through the transformer blocks.
+Every model and image remains below the 1% relative-L1 requirement. CPU and
+GPU results are numerically close but not bitwise identical; backend-specific
+reductions, transcendental implementations, and selected packed-FP16 storage
+accumulate small differences through the transformer.
 
-Average complete image inference times were:
-
-| Encoder | Native DLL | PyTorch CPU | Native speedup |
-|---|---:|---:|---:|
-| ViT-S | 0.122 s | 0.726 s | 5.95x |
-| ViT-B | 0.255 s | 2.330 s | 9.14x |
-| ViT-L | 0.693 s | 6.464 s | 9.33x |
-
-These native figures are the average of all 20 images through one persistent
-context. The same run completed the suite in 2.437 s, 5.093 s, and 13.853 s
-for ViT-S, ViT-B, and ViT-L respectively. Runtime optimizations preserve the
-compatibility operation order; the final S/B/L outputs remain bit-identical to
-the stored Python Vulkan references.
+The same runs, including each context's first-use autotuning and the poster's
+extreme aspect ratio, took 4.449/8.388/23.537 seconds in the DLL versus
+25.232/68.725/197.102 seconds in PyTorch CPU for ViT-S/B/L: aggregate speedups
+of 5.67x, 8.19x, and 8.37x.
 
 `tools/compare_assets.py` reproduces the test and writes per-image CSV results
-and native depth previews. The DA-2K benchmark poster and project teaser are
-not part of this photo suite; the poster's extreme aspect ratio creates a
-pathological 6,000-plus-token CPU attention workload at the default input
-size.
+and native depth previews. It accepts ordinary state dictionaries and the
+development ViT-S TorchScript checkpoint.
 
 ## Runtime implementation strategy
 
@@ -119,7 +110,10 @@ names, and a model whose encoder does not match `dav2_create_options`.
 
 Current converted model sizes are approximately 99 MB for ViT-S, 390 MB for
 ViT-B, and 1.34 GB for ViT-L. The files are memory-mapped and tensors are
-uploaded directly to Vulkan device memory during context creation.
+uploaded directly to Vulkan device memory during context creation. Precision
+autotuning initially needs FP32 and packed-FP16 candidates for eligible
+weights; immediately after selection, the unused copy is destroyed instead of
+remaining in the Vulkan allocation pool.
 
 ## Native ABI
 
