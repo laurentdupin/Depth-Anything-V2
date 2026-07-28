@@ -65,7 +65,8 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t embedding,
-        std::uint32_t output_channels);
+        std::uint32_t output_channels,
+        bool half_weight = false);
 
     void conv2d(
         VulkanBuffer& output,
@@ -92,7 +93,8 @@ public:
         std::uint32_t input_height,
         std::uint32_t input_channels,
         std::uint32_t output_channels,
-        std::uint32_t kernel);
+        std::uint32_t kernel,
+        bool half_weight = false);
 
     void bilinear_align_true(
         VulkanBuffer& output,
@@ -127,11 +129,13 @@ private:
     VulkanPipeline add_position_;
     VulkanPipeline add_;
     VulkanPipeline project_tokens_;
+    VulkanPipeline project_tokens_half_;
     VulkanPipeline conv2d_;
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
     VulkanPipeline conv2d8_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
+    VulkanPipeline conv_transpose_nonoverlap_half_;
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline relu_;
 };

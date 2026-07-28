@@ -29,6 +29,7 @@ public:
 
 private:
     void select_convolution_block();
+    const VulkanBuffer& selected_weight(const std::string& name) const;
 
     FeatureMap conv(
         FeatureMap&& input,

@@ -160,6 +160,14 @@ void DptHead::select_convolution_block() {
     convolution_block_selected_ = true;
 }
 
+const VulkanBuffer& DptHead::selected_weight(
+    const std::string& name) const {
+    const GpuTensor& tensor = weights_.tensor(name);
+    return convolution_half_weight_
+        ? tensor.half_buffer
+        : tensor.buffer;
+}
+
 FeatureMap DptHead::conv(
     FeatureMap&& input,
     const std::string& weight_name,
@@ -311,12 +319,13 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             operators_.project_tokens(
                 projected.buffer,
                 encoded.features[index],
-                weight(weights_, prefix + ".weight"),
+                selected_weight(prefix + ".weight"),
                 weight(weights_, prefix + ".bias"),
                 encoded.patch_width,
                 encoded.patch_height,
                 embedding_,
-                project_channels_[index]);
+                project_channels_[index],
+                convolution_half_weight_);
             if (index < 2) {
                 const std::uint32_t kernel = index == 0 ? 4 : 2;
                 FeatureMap resized{
@@ -335,13 +344,14 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
                 operators_.conv_transpose_nonoverlap(
                     resized.buffer,
                     projected.buffer,
-                    weight(weights_, resize + ".weight"),
+                    selected_weight(resize + ".weight"),
                     weight(weights_, resize + ".bias"),
                     projected.width,
                     projected.height,
                     projected.channels,
                     projected.channels,
-                    kernel);
+                    kernel,
+                    convolution_half_weight_);
                 layers[index] = std::move(resized);
             } else if (index == 2) {
                 layers[index] = std::move(projected);

@@ -10,6 +10,7 @@
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
+#include "conv_transpose_nonoverlap_half_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
@@ -19,6 +20,7 @@
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
+#include "project_tokens_half_spv.h"
 #include "relu_spv.h"
 #include "softmax_lastdim_spv.h"
 
@@ -113,6 +115,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_project_tokens_spv_size,
           4,
           16)),
+      project_tokens_half_(context.create_pipeline(
+          dav2_project_tokens_half_spv,
+          dav2_project_tokens_half_spv_size,
+          4,
+          16)),
       conv2d_(context.create_pipeline(
           dav2_conv2d_spv, dav2_conv2d_spv_size, 4, 40)),
       conv2d8_(context.create_pipeline(
@@ -127,6 +134,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv_transpose_nonoverlap_(context.create_pipeline(
           dav2_conv_transpose_nonoverlap_spv,
           dav2_conv_transpose_nonoverlap_spv_size,
+          4,
+          20)),
+      conv_transpose_nonoverlap_half_(context.create_pipeline(
+          dav2_conv_transpose_nonoverlap_half_spv,
+          dav2_conv_transpose_nonoverlap_half_spv_size,
           4,
           20)),
       bilinear_align_true_(context.create_pipeline(
@@ -460,7 +472,8 @@ void VulkanOperators::project_tokens(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t embedding,
-    std::uint32_t output_channels) {
+    std::uint32_t output_channels,
+    bool half_weight) {
     if (width == 0 || height == 0 || embedding == 0 ||
         output_channels == 0) {
         throw std::invalid_argument("invalid token projection dimensions");
@@ -469,8 +482,13 @@ void VulkanOperators::project_tokens(
         tokens,
         (std::uint64_t(width) * height + 1) * embedding,
         "tokens");
-    require_bytes(
-        weight, std::uint64_t(output_channels) * embedding, "weight");
+    const std::uint64_t weight_elements =
+        std::uint64_t(output_channels) * embedding;
+    if (half_weight) {
+        require_half_elements(weight, weight_elements, "weight");
+    } else {
+        require_bytes(weight, weight_elements, "weight");
+    }
     require_bytes(bias, output_channels, "bias");
     require_bytes(
         output,
@@ -483,7 +501,7 @@ void VulkanOperators::project_tokens(
         std::uint32_t output_channels;
     } parameters{width, height, embedding, output_channels};
     context_.dispatch(
-        project_tokens_,
+        half_weight ? project_tokens_half_ : project_tokens_,
         {&output, &tokens, &weight, &bias},
         &parameters,
         sizeof(parameters),
@@ -571,7 +589,8 @@ void VulkanOperators::conv_transpose_nonoverlap(
     std::uint32_t input_height,
     std::uint32_t input_channels,
     std::uint32_t output_channels,
-    std::uint32_t kernel) {
+    std::uint32_t kernel,
+    bool half_weight) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0) {
         throw std::invalid_argument("invalid transposed convolution dimensions");
@@ -582,10 +601,15 @@ void VulkanOperators::conv_transpose_nonoverlap(
         input,
         std::uint64_t(input_width) * input_height * input_channels,
         "transposed convolution input");
-    require_bytes(
-        weight,
-        std::uint64_t(input_channels) * output_channels * kernel * kernel,
-        "transposed convolution weight");
+    const std::uint64_t weight_elements =
+        std::uint64_t(input_channels) * output_channels * kernel * kernel;
+    if (half_weight) {
+        require_half_elements(
+            weight, weight_elements, "transposed convolution weight");
+    } else {
+        require_bytes(
+            weight, weight_elements, "transposed convolution weight");
+    }
     require_bytes(bias, output_channels, "transposed convolution bias");
     require_bytes(
         output,
@@ -600,7 +624,9 @@ void VulkanOperators::conv_transpose_nonoverlap(
     } parameters{
         input_width, input_height, input_channels, output_channels, kernel};
     context_.dispatch(
-        conv_transpose_nonoverlap_,
+        half_weight
+            ? conv_transpose_nonoverlap_half_
+            : conv_transpose_nonoverlap_,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
