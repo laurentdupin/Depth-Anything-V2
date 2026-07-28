@@ -25,7 +25,7 @@ public:
     DinoEncoder(
         dav2_encoder encoder,
         VulkanContext& context,
-        const GpuModel& weights,
+        GpuModel& weights,
         VulkanOperators& operators);
 
     EncoderOutput forward(
@@ -45,7 +45,7 @@ private:
 
     dav2_encoder encoder_;
     VulkanContext& context_;
-    const GpuModel& weights_;
+    GpuModel& weights_;
     VulkanOperators& operators_;
     std::uint32_t embedding_ = 0;
     std::uint32_t heads_ = 0;

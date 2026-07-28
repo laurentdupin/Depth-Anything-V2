@@ -785,6 +785,27 @@ void VulkanContext::recycle_or_destroy(
     }
 }
 
+void VulkanContext::discard(VulkanBuffer& buffer) noexcept {
+    if (buffer.owner_ != this || buffer.buffer_ == VK_NULL_HANDLE) {
+        return;
+    }
+    if (batch_command_ != VK_NULL_HANDLE) {
+        destroy(buffer);
+        return;
+    }
+    if (buffer.mapped_) {
+        vkUnmapMemory(device_, buffer.memory_);
+    }
+    vkDestroyBuffer(device_, buffer.buffer_, nullptr);
+    vkFreeMemory(device_, buffer.memory_, nullptr);
+    buffer.owner_ = nullptr;
+    buffer.buffer_ = VK_NULL_HANDLE;
+    buffer.memory_ = VK_NULL_HANDLE;
+    buffer.size_ = 0;
+    buffer.mapped_ = nullptr;
+    buffer.cacheable_ = false;
+}
+
 void VulkanContext::destroy(VulkanPipeline& pipeline) noexcept {
     if (!pipeline.cached_descriptor_sets_.empty()) {
         vkFreeDescriptorSets(

@@ -27,7 +27,7 @@ const VulkanBuffer& weight(
 DptHead::DptHead(
     dav2_encoder encoder,
     VulkanContext& context,
-    const GpuModel& weights,
+    GpuModel& weights,
     VulkanOperators& operators)
     : context_(context),
       weights_(weights),
@@ -157,6 +157,7 @@ void DptHead::select_convolution_block() {
         : best_fp32;
     convolution_block8_ = best->block8;
     convolution_half_weight_ = best->half_weight;
+    weights_.retain_dpt_precision(convolution_half_weight_);
     convolution_block_selected_ = true;
 }
 

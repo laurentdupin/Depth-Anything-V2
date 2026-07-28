@@ -22,7 +22,7 @@ public:
     DptHead(
         dav2_encoder encoder,
         VulkanContext& context,
-        const GpuModel& weights,
+        GpuModel& weights,
         VulkanOperators& operators);
 
     FeatureMap forward(EncoderOutput&& encoded);
@@ -51,7 +51,7 @@ private:
         std::uint32_t output_height);
 
     VulkanContext& context_;
-    const GpuModel& weights_;
+    GpuModel& weights_;
     VulkanOperators& operators_;
     std::uint32_t embedding_ = 0;
     std::uint32_t features_ = 0;

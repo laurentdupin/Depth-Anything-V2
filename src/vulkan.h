@@ -65,6 +65,7 @@ public:
 
     VulkanBuffer create_device_buffer(VkDeviceSize bytes);
     VulkanBuffer create_host_buffer(VkDeviceSize bytes);
+    void discard(VulkanBuffer& buffer) noexcept;
     void write_host(
         VulkanBuffer& destination,
         const void* data,

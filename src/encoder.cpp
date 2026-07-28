@@ -25,7 +25,7 @@ std::string block_name(std::uint32_t block, const char* suffix) {
 DinoEncoder::DinoEncoder(
     dav2_encoder encoder,
     VulkanContext& context,
-    const GpuModel& weights,
+    GpuModel& weights,
     VulkanOperators& operators)
     : encoder_(encoder),
       context_(context),
@@ -190,6 +190,7 @@ void DinoEncoder::select_linear_tile() {
         : best_fp32;
     linear_block16_ = best->block16;
     linear_half_weight_ = best->half_weight;
+    weights_.retain_transformer_precision(linear_half_weight_);
     linear_tile_selected_ = true;
 }
 

@@ -13,8 +13,20 @@ namespace {
 
 bool use_half_weight(std::string_view name) {
     constexpr std::string_view suffix = ".weight";
-    return name.size() >= suffix.size() &&
+    const bool weight =
+        name.size() >= suffix.size() &&
         name.substr(name.size() - suffix.size()) == suffix;
+    if (!weight) {
+        return false;
+    }
+    if (name.rfind("depth_head.", 0) == 0) {
+        return true;
+    }
+    if (name.rfind("pretrained.blocks.", 0) != 0) {
+        return false;
+    }
+    return name.find(".attn.") != std::string_view::npos ||
+        name.find(".mlp.") != std::string_view::npos;
 }
 
 std::uint16_t float_to_half(float input) {
@@ -93,7 +105,8 @@ std::uint32_t crc32(const void* data, std::size_t bytes) {
     return value ^ 0xffffffffu;
 }
 
-GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
+GpuModel::GpuModel(const ModelFile& model, VulkanContext& context)
+    : context_(context) {
     tensors_.reserve(model.tensor_count());
     for (std::string_view name : model.tensor_names()) {
         const TensorView& source = model.tensor(name);
@@ -152,6 +165,36 @@ const GpuTensor& GpuModel::tensor(std::string_view name) const {
             "GPU model is missing tensor: " + std::string(name));
     }
     return found->second;
+}
+
+void GpuModel::retain_transformer_precision(bool half_weight) {
+    for (auto& entry : tensors_) {
+        const std::string_view name = entry.first;
+        if (name.rfind("pretrained.blocks.", 0) != 0 ||
+            name.size() < 7 ||
+            name.substr(name.size() - 7) != ".weight" ||
+            (name.find(".attn.") == std::string_view::npos &&
+             name.find(".mlp.") == std::string_view::npos)) {
+            continue;
+        }
+        GpuTensor& tensor = entry.second;
+        context_.discard(
+            half_weight ? tensor.buffer : tensor.half_buffer);
+    }
+}
+
+void GpuModel::retain_dpt_precision(bool half_weight) {
+    for (auto& entry : tensors_) {
+        const std::string_view name = entry.first;
+        if (name.rfind("depth_head.", 0) != 0 ||
+            name.size() < 7 ||
+            name.substr(name.size() - 7) != ".weight") {
+            continue;
+        }
+        GpuTensor& tensor = entry.second;
+        context_.discard(
+            half_weight ? tensor.buffer : tensor.half_buffer);
+    }
 }
 
 }  // namespace dav2
