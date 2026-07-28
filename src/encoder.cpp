@@ -346,8 +346,17 @@ EncoderOutput DinoEncoder::forward(
     result.embedding = embedding_;
     std::uint32_t capture_index = 0;
 
-    context_.batch([&] {
-        for (std::uint32_t block = 0; block < blocks_; ++block) {
+    const std::uint32_t blocks_per_submission =
+        tokens > 2000 ? 4 : blocks_;
+    for (std::uint32_t block_begin = 0;
+         block_begin < blocks_;
+         block_begin += blocks_per_submission) {
+        const std::uint32_t block_end =
+            std::min(blocks_, block_begin + blocks_per_submission);
+        context_.batch([&, block_begin, block_end] {
+        for (std::uint32_t block = block_begin;
+             block < block_end;
+             ++block) {
             operators_.layer_norm(
                 normalized,
                 current,
@@ -448,7 +457,8 @@ EncoderOutput DinoEncoder::forward(
                 ++capture_index;
             }
         }
-    });
+        });
+    }
     if (result.features.size() != 4) {
         throw std::runtime_error("encoder did not produce four features");
     }

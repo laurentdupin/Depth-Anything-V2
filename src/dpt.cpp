@@ -301,7 +301,7 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
         select_convolution_block();
     }
     FeatureMap layers[4];
-    context_.batch([&] {
+    const auto run_projections = [&] {
         for (std::uint32_t index = 0; index < 4; ++index) {
             context_.batch([&] {
             FeatureMap projected{
@@ -369,12 +369,17 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             }
             });
         }
-    });
+    };
+    if (encoded.tokens > 2000) {
+        run_projections();
+    } else {
+        context_.batch(run_projections);
+    }
 
     FeatureMap refined[4];
     FeatureMap path;
     FeatureMap depth;
-    context_.batch([&] {
+    const auto run_head = [&] {
     context_.batch([&] {
         for (std::uint32_t index = 0; index < 4; ++index) {
             const std::string prefix =
@@ -482,7 +487,12 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             depth.buffer,
             depth.width * depth.height);
     });
-    });
+    };
+    if (encoded.tokens > 2000) {
+        run_head();
+    } else {
+        context_.batch(run_head);
+    }
     return depth;
 }
 
