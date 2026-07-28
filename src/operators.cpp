@@ -51,7 +51,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       layer_norm_(context.create_pipeline(
           dav2_layer_norm_spv, dav2_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
-          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 3, 8)),
+          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
       split_qkv_(context.create_pipeline(
           dav2_split_qkv_spv, dav2_split_qkv_spv_size, 4, 16)),
       bmm_(context.create_pipeline(
@@ -199,18 +199,9 @@ void VulkanOperators::add_scaled(
     } parameters{count, columns};
     context_.dispatch(
         add_scaled_,
-        {&output, &addend, &scale},
+        {&output, &addend, &scale, &residual},
         &parameters,
         sizeof(parameters),
-        divide_up(count, 256));
-    struct AddParameters {
-        std::uint32_t count;
-    } add_parameters{count};
-    context_.dispatch(
-        add_,
-        {&output, &residual, &output},
-        &add_parameters,
-        sizeof(add_parameters),
         divide_up(count, 256));
 }
 

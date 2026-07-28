@@ -11,6 +11,9 @@ layout(set = 0, binding = 1, std430) readonly buffer Addend {
 layout(set = 0, binding = 2, std430) readonly buffer Scale {
     float data[];
 } scale_buffer;
+layout(set = 0, binding = 3, std430) readonly buffer Residual {
+    float data[];
+} residual_buffer;
 
 layout(push_constant) uniform Parameters {
     uint count;
@@ -20,8 +23,10 @@ layout(push_constant) uniform Parameters {
 void main() {
     const uint index = gl_GlobalInvocationID.x;
     if (index < parameters.count) {
-        output_buffer.data[index] =
+        precise float scaled =
             addend_buffer.data[index] *
             scale_buffer.data[index % parameters.columns];
+        precise float result = residual_buffer.data[index] + scaled;
+        output_buffer.data[index] = result;
     }
 }
