@@ -20,30 +20,36 @@ if(DAV2_WITH_VULKAN)
 
     set(DAV2_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(MAKE_DIRECTORY "${DAV2_GENERATED_DIR}")
-    set(DAV2_ELEMENTWISE_SPV "${DAV2_GENERATED_DIR}/elementwise.spv")
-    set(DAV2_ELEMENTWISE_HEADER "${DAV2_GENERATED_DIR}/elementwise_spv.h")
-    add_custom_command(
-        OUTPUT "${DAV2_ELEMENTWISE_SPV}"
-        COMMAND Vulkan::glslc
-            -O
-            -fshader-stage=compute
-            -o "${DAV2_ELEMENTWISE_SPV}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/elementwise.glsl"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/elementwise.glsl"
-        VERBATIM
-    )
-    add_custom_command(
-        OUTPUT "${DAV2_ELEMENTWISE_HEADER}"
-        COMMAND "${CMAKE_COMMAND}"
-            "-DINPUT=${DAV2_ELEMENTWISE_SPV}"
-            "-DOUTPUT=${DAV2_ELEMENTWISE_HEADER}"
-            "-DVARIABLE=dav2_elementwise_spv"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        DEPENDS
-            "${DAV2_ELEMENTWISE_SPV}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
-        VERBATIM
-    )
+
+    function(dav2_compile_shader NAME)
+        set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${NAME}.glsl")
+        set(SPIRV "${DAV2_GENERATED_DIR}/${NAME}.spv")
+        set(HEADER "${DAV2_GENERATED_DIR}/${NAME}_spv.h")
+        add_custom_command(
+            OUTPUT "${SPIRV}"
+            COMMAND Vulkan::glslc -O -fshader-stage=compute
+                -o "${SPIRV}" "${SOURCE}"
+            DEPENDS "${SOURCE}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${HEADER}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${SPIRV}"
+                "-DOUTPUT=${HEADER}"
+                "-DVARIABLE=dav2_${NAME}_spv"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            DEPENDS "${SPIRV}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            VERBATIM
+        )
+        set(DAV2_SHADER_HEADERS ${DAV2_SHADER_HEADERS} "${HEADER}" PARENT_SCOPE)
+    endfunction()
+
+    dav2_compile_shader(elementwise)
+    dav2_compile_shader(linear)
+    dav2_compile_shader(linear_gelu)
+    dav2_compile_shader(layer_norm)
+    dav2_compile_shader(add_scaled)
 endif()
 
 add_library(depth_anything_v2 SHARED
@@ -73,9 +79,10 @@ set_target_properties(depth_anything_v2 PROPERTIES
 if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
         src/model.cpp
+        src/operators.cpp
         src/vulkan.cpp
         src/vulkan_executor.cpp
-        "${DAV2_ELEMENTWISE_HEADER}"
+        ${DAV2_SHADER_HEADERS}
     )
     target_include_directories(depth_anything_v2 PRIVATE "${DAV2_GENERATED_DIR}")
     target_link_libraries(depth_anything_v2 PRIVATE Vulkan::Vulkan)
@@ -112,8 +119,9 @@ if(DAV2_BUILD_TESTS)
     if(DAV2_WITH_VULKAN)
         add_executable(dav2_vulkan_smoke
             tests/vulkan_smoke.cpp
+            src/operators.cpp
             src/vulkan.cpp
-            "${DAV2_ELEMENTWISE_HEADER}"
+            ${DAV2_SHADER_HEADERS}
         )
         target_compile_features(dav2_vulkan_smoke PRIVATE cxx_std_17)
         target_include_directories(dav2_vulkan_smoke PRIVATE
