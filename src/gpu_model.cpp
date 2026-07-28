@@ -1,5 +1,6 @@
 #include "gpu_model.h"
 
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -12,14 +13,22 @@ std::uint32_t crc32(const void* data, std::size_t bytes) {
         throw std::invalid_argument("CRC32 input is null");
     }
     auto* current = static_cast<const unsigned char*>(data);
+    static const std::array<std::uint32_t, 256> table = [] {
+        std::array<std::uint32_t, 256> result{};
+        for (std::uint32_t byte = 0; byte < result.size(); ++byte) {
+            std::uint32_t entry = byte;
+            for (int bit = 0; bit < 8; ++bit) {
+                const std::uint32_t mask =
+                    0u - static_cast<std::uint32_t>(entry & 1u);
+                entry = (entry >> 1) ^ (0xedb88320u & mask);
+            }
+            result[byte] = entry;
+        }
+        return result;
+    }();
     std::uint32_t value = 0xffffffffu;
     for (std::size_t index = 0; index < bytes; ++index) {
-        value ^= current[index];
-        for (int bit = 0; bit < 8; ++bit) {
-            const std::uint32_t mask =
-                0u - static_cast<std::uint32_t>(value & 1u);
-            value = (value >> 1) ^ (0xedb88320u & mask);
-        }
+        value = table[(value ^ current[index]) & 0xffu] ^ (value >> 8);
     }
     return value ^ 0xffffffffu;
 }
