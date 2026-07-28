@@ -143,6 +143,7 @@ ModelFile::ModelFile(
         }
 
         tensors_.reserve(header.tensor_count);
+        tensor_names_.reserve(header.tensor_count);
         const auto* records = reinterpret_cast<const TensorRecord*>(
             view_ + header.directory_offset);
         for (std::uint32_t index = 0; index < header.tensor_count; ++index) {
@@ -198,6 +199,7 @@ ModelFile::ModelFile(
             if (!tensors_.emplace(name, tensor).second) {
                 throw std::runtime_error("duplicate DAV2 tensor name");
             }
+            tensor_names_.push_back(name);
         }
     } catch (...) {
         close();
@@ -213,6 +215,7 @@ ModelFile::~ModelFile() {
 void ModelFile::close() noexcept {
 #if defined(_WIN32)
     tensors_.clear();
+    tensor_names_.clear();
     if (view_) {
         UnmapViewOfFile(view_);
         view_ = nullptr;

@@ -1,4 +1,5 @@
 #include "elementwise_spv.h"
+#include "gpu_model.h"
 #include "operators.h"
 #include "vulkan.h"
 
@@ -19,6 +20,9 @@ void expect_near(float actual, float expected, float tolerance) {
 }  // namespace
 
 int main() {
+    static constexpr char crc_text[] = "123456789";
+    assert(dav2::crc32(crc_text, 9) == 0xcbf43926u);
+
     dav2::VulkanContext context(0);
     const std::vector<float> input{
         -4.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 7.0f, 12.0f,

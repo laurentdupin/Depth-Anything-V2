@@ -82,6 +82,7 @@ set_target_properties(depth_anything_v2 PROPERTIES
 if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
         src/model.cpp
+        src/gpu_model.cpp
         src/operators.cpp
         src/vulkan.cpp
         src/vulkan_executor.cpp
@@ -122,12 +123,15 @@ if(DAV2_BUILD_TESTS)
     if(DAV2_WITH_VULKAN)
         add_executable(dav2_vulkan_smoke
             tests/vulkan_smoke.cpp
+            src/gpu_model.cpp
+            src/model.cpp
             src/operators.cpp
             src/vulkan.cpp
             ${DAV2_SHADER_HEADERS}
         )
         target_compile_features(dav2_vulkan_smoke PRIVATE cxx_std_17)
         target_include_directories(dav2_vulkan_smoke PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${DAV2_GENERATED_DIR}"
         )

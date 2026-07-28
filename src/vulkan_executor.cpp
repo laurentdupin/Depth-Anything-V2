@@ -1,5 +1,7 @@
 #include "executor.h"
+#include "gpu_model.h"
 #include "model.h"
+#include "operators.h"
 #include "vulkan.h"
 
 #include <memory>
@@ -16,7 +18,9 @@ public:
         dav2_encoder encoder,
         int vulkan_device_index)
         : model_(model_path, encoder),
-          context_(static_cast<std::uint32_t>(vulkan_device_index)) {}
+          context_(static_cast<std::uint32_t>(vulkan_device_index)),
+          weights_(model_, context_),
+          operators_(context_) {}
 
     void infer(const float*, int, int, float*) override {
         throw std::runtime_error(
@@ -26,6 +30,8 @@ public:
 private:
     ModelFile model_;
     VulkanContext context_;
+    GpuModel weights_;
+    VulkanOperators operators_;
 };
 
 }  // namespace
