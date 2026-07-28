@@ -36,15 +36,21 @@ reduced-precision storage or arithmetic is never enabled in compatibility mode.
 
 ## Runtime implementation strategy
 
-The first executor uses the repository owner's Vulkan-enabled PyTorch build as
-the semantic reference. It loads an inference-only serialized model and keeps
-weights and intermediate tensors on the selected Vulkan adapter. This proves
-the ABI, model graph, dynamic-shape behavior, and output parity before runtime
-trimming.
+The DLL owns its complete inference stack:
 
-The release build statically links only the dispatcher, serialization, tensor,
-and Vulkan operator closure reached by the three supported model variants. The
-selected-op manifest is generated from model execution coverage. This avoids
-shipping the Python binding, autograd, optimizers, distributed code, training
-kernels, CUDA, ROCm, or unrelated operators while preserving the already
-validated Vulkan kernels.
+- a bounded flat model-file parser;
+- Vulkan instance, adapter, queue, memory, descriptor, pipeline, and command
+  submission management;
+- embedded SPIR-V compute shaders;
+- tensor layouts and inference-only operators required by DINOv2 and DPT;
+- deterministic CPU image preprocessing and final depth resize.
+
+No tensor or inference framework is linked. PyTorch is only a development
+reference used to convert official checkpoints and produce comparison outputs.
+Relevant Vulkan kernels from the local PyTorch source may be adapted into this
+runtime, but the dispatcher, Tensor implementation, JIT, autograd, Python
+binding, and unrelated operators are not included.
+
+On Windows the C/C++ runtime is linked statically. The only non-system API
+loaded by the resulting DLL is `vulkan-1.dll`, supplied by the installed GPU
+driver.

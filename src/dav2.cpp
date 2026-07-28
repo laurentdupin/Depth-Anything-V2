@@ -48,14 +48,14 @@ dav2_status protect(Function&& function) {
 
 }  // namespace
 
-#if !defined(DAV2_WITH_TORCH)
+#if !defined(DAV2_WITH_VULKAN)
 namespace dav2 {
 std::unique_ptr<Executor> create_executor(
     const std::string&,
     dav2_encoder,
     int) {
     throw std::runtime_error(
-        "this DLL was built without the Vulkan model executor");
+        "this DLL was built without Vulkan");
 }
 }  // namespace dav2
 #endif
