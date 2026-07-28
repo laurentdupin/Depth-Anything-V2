@@ -11,6 +11,7 @@
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
+#include "linear16_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -45,6 +46,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     : context_(context),
       linear_(context.create_pipeline(
           dav2_linear_spv, dav2_linear_spv_size, 4, 12)),
+      linear16_(context.create_pipeline(
+          dav2_linear16_spv, dav2_linear16_spv_size, 4, 12)),
       gelu_(context.create_pipeline(
           dav2_gelu_spv, dav2_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
@@ -111,7 +114,8 @@ void VulkanOperators::linear(
     std::uint32_t rows,
     std::uint32_t input_columns,
     std::uint32_t output_columns,
-    bool gelu) {
+    bool gelu,
+    bool block16) {
     if (rows == 0 || input_columns == 0 || output_columns == 0) {
         throw std::invalid_argument("linear dimensions cannot be zero");
     }
@@ -129,7 +133,7 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        linear_,
+        block16 ? linear16_ : linear_,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),

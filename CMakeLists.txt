@@ -35,6 +35,7 @@ if(DAV2_WITH_VULKAN)
                 "${SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_common.glsl"
             VERBATIM
         )
         add_custom_command(
@@ -52,6 +53,7 @@ if(DAV2_WITH_VULKAN)
 
     dav2_compile_shader(elementwise)
     dav2_compile_shader(linear)
+    dav2_compile_shader(linear16)
     dav2_compile_shader(gelu)
     dav2_compile_shader(layer_norm)
     dav2_compile_shader(add_scaled)

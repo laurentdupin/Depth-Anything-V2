@@ -18,7 +18,8 @@ public:
         std::uint32_t rows,
         std::uint32_t input_columns,
         std::uint32_t output_columns,
-        bool gelu);
+        bool gelu,
+        bool block16 = false);
 
     void layer_norm(
         VulkanBuffer& output,
@@ -110,6 +111,7 @@ public:
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
+    VulkanPipeline linear16_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;

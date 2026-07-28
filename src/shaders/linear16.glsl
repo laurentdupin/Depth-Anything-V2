@@ -1,4 +1,4 @@
 #version 450 core
 
-#define K_TILE 8
+#define K_TILE 16
 #include "linear_common.glsl"

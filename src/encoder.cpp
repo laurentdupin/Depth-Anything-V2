@@ -131,7 +131,8 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 embedding_ * 3,
-                false);
+                false,
+                embedding_ >= 1024);
             operators_.attention_head64(
                 attention, qkv, tokens, heads_);
             operators_.linear(
@@ -142,7 +143,8 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 embedding_,
-                false);
+                false,
+                embedding_ >= 1024);
             operators_.add_scaled(
                 next,
                 current,
@@ -168,7 +170,8 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 embedding_ * 4,
-                true);
+                true,
+                embedding_ >= 1024);
             operators_.linear(
                 query,
                 hidden,
@@ -177,7 +180,8 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_ * 4,
                 embedding_,
-                false);
+                false,
+                embedding_ >= 1024);
             operators_.add_scaled(
                 next,
                 current,
