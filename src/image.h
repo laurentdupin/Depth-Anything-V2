@@ -21,12 +21,4 @@ void preprocess_bgr8(
     ImageShape destination,
     std::vector<float>& rgb_chw);
 
-void resize_bilinear_align_corners(
-    const float* source,
-    int source_width,
-    int source_height,
-    float* destination,
-    int destination_width,
-    int destination_height);
-
 }  // namespace dav2

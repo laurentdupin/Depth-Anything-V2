@@ -33,7 +33,9 @@ to the repository's Python model running through the reference PyTorch Vulkan
 backend. This was checked for ViT-S, ViT-B, and ViT-L at both the native
 518-by-518 positional grid and a non-square 70-by-56 grid. A separate
 280-by-182 non-zero input comparison for ViT-S also had zero differing float32
-values across all 50,960 output pixels.
+values across all 50,960 output pixels. The complete BGR8 API, including cubic
+preprocessing and the final Vulkan resize back to a non-square source image,
+was also bit-identical across all tested output pixels.
 
 Floating-point operations are not necessarily bitwise reproducible across
 different GPU architectures or driver shader compilers. Compatibility mode

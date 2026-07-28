@@ -156,45 +156,4 @@ void preprocess_bgr8(
     }
 }
 
-void resize_bilinear_align_corners(
-    const float* source,
-    int source_width,
-    int source_height,
-    float* destination,
-    int destination_width,
-    int destination_height) {
-    if (source == nullptr || destination == nullptr || source_width <= 0 ||
-        source_height <= 0 || destination_width <= 0 || destination_height <= 0) {
-        throw std::invalid_argument("invalid resize image");
-    }
-
-    const double scale_x = destination_width > 1
-        ? static_cast<double>(source_width - 1) / (destination_width - 1)
-        : 0.0;
-    const double scale_y = destination_height > 1
-        ? static_cast<double>(source_height - 1) / (destination_height - 1)
-        : 0.0;
-
-    for (int dy = 0; dy < destination_height; ++dy) {
-        const double sy = dy * scale_y;
-        const int y0 = static_cast<int>(sy);
-        const int y1 = std::min(y0 + 1, source_height - 1);
-        const float fy = static_cast<float>(sy - y0);
-        for (int dx = 0; dx < destination_width; ++dx) {
-            const double sx = dx * scale_x;
-            const int x0 = static_cast<int>(sx);
-            const int x1 = std::min(x0 + 1, source_width - 1);
-            const float fx = static_cast<float>(sx - x0);
-            const float top =
-                source[y0 * source_width + x0] * (1.0f - fx) +
-                source[y0 * source_width + x1] * fx;
-            const float bottom =
-                source[y1 * source_width + x0] * (1.0f - fx) +
-                source[y1 * source_width + x1] * fx;
-            destination[dy * destination_width + dx] =
-                top * (1.0f - fy) + bottom * fy;
-        }
-    }
-}
-
 }  // namespace dav2

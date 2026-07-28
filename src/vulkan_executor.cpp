@@ -27,6 +27,16 @@ public:
           dpt_(encoder, context_, weights_, operators_) {}
 
     void infer(const float* input, int width, int height, float* output) override {
+        infer_resized(input, width, height, output, width, height);
+    }
+
+    void infer_resized(
+        const float* input,
+        int width,
+        int height,
+        float* output,
+        int output_width,
+        int output_height) override {
         const std::size_t input_elements =
             static_cast<std::size_t>(width) * height * 3;
         VulkanBuffer image =
@@ -38,10 +48,25 @@ public:
             static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height));
         FeatureMap depth = dpt_.forward(std::move(encoded));
+        if (output_width != width || output_height != height) {
+            VulkanBuffer resized = context_.create_device_buffer(
+                static_cast<std::size_t>(output_width) *
+                output_height * sizeof(float));
+            operators_.bilinear_align_true(
+                resized,
+                depth.buffer,
+                static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height),
+                static_cast<std::uint32_t>(output_width),
+                static_cast<std::uint32_t>(output_height),
+                1);
+            depth.buffer = std::move(resized);
+        }
         context_.download(
             depth.buffer,
             output,
-            static_cast<std::size_t>(width) * height * sizeof(float));
+            static_cast<std::size_t>(output_width) *
+                output_height * sizeof(float));
     }
 
 private:

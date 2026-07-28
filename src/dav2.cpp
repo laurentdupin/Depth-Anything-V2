@@ -190,12 +190,8 @@ dav2_status DAV2_CALL dav2_infer_bgr8(
         std::vector<float> input;
         dav2::preprocess_bgr8(
             bgr, image_width, image_height, row_stride_bytes, shape, input);
-        std::vector<float> network_depth(
-            static_cast<size_t>(shape.width) * shape.height);
-        context->executor->infer(
-            input.data(), shape.width, shape.height, network_depth.data());
-        dav2::resize_bilinear_align_corners(
-            network_depth.data(),
+        context->executor->infer_resized(
+            input.data(),
             shape.width,
             shape.height,
             output_depth,

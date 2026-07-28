@@ -24,11 +24,5 @@ int main() {
     assert(std::abs(chw[1] - static_cast<float>((0.0 - 0.456) / 0.224)) < 1e-6f);
     assert(std::abs(chw[2] - static_cast<float>((0.0 - 0.406) / 0.225)) < 1e-6f);
 
-    const float source[] = {0.0f, 1.0f, 2.0f, 3.0f};
-    float destination[9] = {};
-    dav2::resize_bilinear_align_corners(source, 2, 2, destination, 3, 3);
-    assert(std::abs(destination[0] - 0.0f) < 1e-6f);
-    assert(std::abs(destination[4] - 1.5f) < 1e-6f);
-    assert(std::abs(destination[8] - 3.0f) < 1e-6f);
     return 0;
 }

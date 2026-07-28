@@ -15,6 +15,13 @@ public:
         int width,
         int height,
         float* depth) = 0;
+    virtual void infer_resized(
+        const float* normalized_rgb_chw,
+        int width,
+        int height,
+        float* depth,
+        int output_width,
+        int output_height) = 0;
 };
 
 std::unique_ptr<Executor> create_executor(
