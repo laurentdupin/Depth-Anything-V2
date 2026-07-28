@@ -186,165 +186,181 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
     }
     FeatureMap layers[4];
     for (std::uint32_t index = 0; index < 4; ++index) {
-        FeatureMap projected{
-            context_.create_device_buffer(
-                elements(
-                    encoded.patch_width,
-                    encoded.patch_height,
-                    project_channels_[index]) *
-                sizeof(float)),
-            encoded.patch_width,
-            encoded.patch_height,
-            project_channels_[index],
-        };
-        const std::string prefix =
-            "depth_head.projects." + std::to_string(index);
-        operators_.project_tokens(
-            projected.buffer,
-            encoded.features[index],
-            weight(weights_, prefix + ".weight"),
-            weight(weights_, prefix + ".bias"),
-            encoded.patch_width,
-            encoded.patch_height,
-            embedding_,
-            project_channels_[index]);
-        if (index < 2) {
-            const std::uint32_t kernel = index == 0 ? 4 : 2;
-            FeatureMap resized{
+        context_.batch([&] {
+            FeatureMap projected{
                 context_.create_device_buffer(
                     elements(
-                        projected.width * kernel,
-                        projected.height * kernel,
-                        projected.channels) *
+                        encoded.patch_width,
+                        encoded.patch_height,
+                        project_channels_[index]) *
                     sizeof(float)),
-                projected.width * kernel,
-                projected.height * kernel,
-                projected.channels,
+                encoded.patch_width,
+                encoded.patch_height,
+                project_channels_[index],
             };
-            const std::string resize =
-                "depth_head.resize_layers." + std::to_string(index);
-            operators_.conv_transpose_nonoverlap(
-                resized.buffer,
+            const std::string prefix =
+                "depth_head.projects." + std::to_string(index);
+            operators_.project_tokens(
                 projected.buffer,
-                weight(weights_, resize + ".weight"),
-                weight(weights_, resize + ".bias"),
-                projected.width,
-                projected.height,
-                projected.channels,
-                projected.channels,
-                kernel);
-            layers[index] = std::move(resized);
-        } else if (index == 2) {
-            layers[index] = std::move(projected);
-        } else {
-            layers[index] = conv(
-                std::move(projected),
-                "depth_head.resize_layers.3.weight",
-                "depth_head.resize_layers.3.bias",
-                project_channels_[3],
-                3,
-                2,
-                1,
-                true);
-        }
+                encoded.features[index],
+                weight(weights_, prefix + ".weight"),
+                weight(weights_, prefix + ".bias"),
+                encoded.patch_width,
+                encoded.patch_height,
+                embedding_,
+                project_channels_[index]);
+            if (index < 2) {
+                const std::uint32_t kernel = index == 0 ? 4 : 2;
+                FeatureMap resized{
+                    context_.create_device_buffer(
+                        elements(
+                            projected.width * kernel,
+                            projected.height * kernel,
+                            projected.channels) *
+                        sizeof(float)),
+                    projected.width * kernel,
+                    projected.height * kernel,
+                    projected.channels,
+                };
+                const std::string resize =
+                    "depth_head.resize_layers." + std::to_string(index);
+                operators_.conv_transpose_nonoverlap(
+                    resized.buffer,
+                    projected.buffer,
+                    weight(weights_, resize + ".weight"),
+                    weight(weights_, resize + ".bias"),
+                    projected.width,
+                    projected.height,
+                    projected.channels,
+                    projected.channels,
+                    kernel);
+                layers[index] = std::move(resized);
+            } else if (index == 2) {
+                layers[index] = std::move(projected);
+            } else {
+                layers[index] = conv(
+                    std::move(projected),
+                    "depth_head.resize_layers.3.weight",
+                    "depth_head.resize_layers.3.bias",
+                    project_channels_[3],
+                    3,
+                    2,
+                    1,
+                    true);
+            }
+        });
     }
 
     FeatureMap refined[4];
-    for (std::uint32_t index = 0; index < 4; ++index) {
-        const std::string prefix =
-            "depth_head.scratch.layer" + std::to_string(index + 1) +
-            "_rn.weight";
-        refined[index] = conv(
-            std::move(layers[index]),
-            prefix,
-            "",
-            features_,
+    context_.batch([&] {
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            const std::string prefix =
+                "depth_head.scratch.layer" + std::to_string(index + 1) +
+                "_rn.weight";
+            refined[index] = conv(
+                std::move(layers[index]),
+                prefix,
+                "",
+                features_,
+                3,
+                1,
+                1,
+                false);
+        }
+    });
+
+    FeatureMap path;
+    context_.batch([&] {
+        path = fusion(
+            std::move(refined[3]),
+            FeatureMap{},
+            "depth_head.scratch.refinenet4",
+            refined[2].width,
+            refined[2].height);
+    });
+    context_.batch([&] {
+        path = fusion(
+            std::move(path),
+            std::move(refined[2]),
+            "depth_head.scratch.refinenet3",
+            refined[1].width,
+            refined[1].height);
+    });
+    context_.batch([&] {
+        path = fusion(
+            std::move(path),
+            std::move(refined[1]),
+            "depth_head.scratch.refinenet2",
+            refined[0].width,
+            refined[0].height);
+    });
+    context_.batch([&] {
+        path = fusion(
+            std::move(path),
+            std::move(refined[0]),
+            "depth_head.scratch.refinenet1",
+            refined[0].width * 2,
+            refined[0].height * 2);
+    });
+
+    FeatureMap depth;
+    context_.batch([&] {
+        path = conv(
+            std::move(path),
+            "depth_head.scratch.output_conv1.weight",
+            "depth_head.scratch.output_conv1.bias",
+            features_ / 2,
             3,
             1,
             1,
-            false);
-    }
-
-    FeatureMap path = fusion(
-        std::move(refined[3]),
-        FeatureMap{},
-        "depth_head.scratch.refinenet4",
-        refined[2].width,
-        refined[2].height);
-    path = fusion(
-        std::move(path),
-        std::move(refined[2]),
-        "depth_head.scratch.refinenet3",
-        refined[1].width,
-        refined[1].height);
-    path = fusion(
-        std::move(path),
-        std::move(refined[1]),
-        "depth_head.scratch.refinenet2",
-        refined[0].width,
-        refined[0].height);
-    path = fusion(
-        std::move(path),
-        std::move(refined[0]),
-        "depth_head.scratch.refinenet1",
-        refined[0].width * 2,
-        refined[0].height * 2);
-
-    path = conv(
-        std::move(path),
-        "depth_head.scratch.output_conv1.weight",
-        "depth_head.scratch.output_conv1.bias",
-        features_ / 2,
-        3,
-        1,
-        1,
-        true);
-    FeatureMap full{
-        context_.create_device_buffer(
-            elements(
-                encoded.patch_width * 14,
-                encoded.patch_height * 14,
-                features_ / 2) *
-            sizeof(float)),
-        encoded.patch_width * 14,
-        encoded.patch_height * 14,
-        features_ / 2,
-    };
-    operators_.bilinear_align_true(
-        full.buffer,
-        path.buffer,
-        path.width,
-        path.height,
-        full.width,
-        full.height,
-        full.channels);
-    full = conv(
-        std::move(full),
-        "depth_head.scratch.output_conv2.0.weight",
-        "depth_head.scratch.output_conv2.0.bias",
-        32,
-        3,
-        1,
-        1,
-        true);
-    operators_.relu(
-        full.buffer,
-        full.buffer,
-        static_cast<std::uint32_t>(
-            elements(full.width, full.height, full.channels)));
-    FeatureMap depth = conv(
-        std::move(full),
-        "depth_head.scratch.output_conv2.2.weight",
-        "depth_head.scratch.output_conv2.2.bias",
-        1,
-        1,
-        1,
-        0,
-        true);
-    operators_.relu(
-        depth.buffer,
-        depth.buffer,
-        depth.width * depth.height);
+            true);
+        FeatureMap full{
+            context_.create_device_buffer(
+                elements(
+                    encoded.patch_width * 14,
+                    encoded.patch_height * 14,
+                    features_ / 2) *
+                sizeof(float)),
+            encoded.patch_width * 14,
+            encoded.patch_height * 14,
+            features_ / 2,
+        };
+        operators_.bilinear_align_true(
+            full.buffer,
+            path.buffer,
+            path.width,
+            path.height,
+            full.width,
+            full.height,
+            full.channels);
+        full = conv(
+            std::move(full),
+            "depth_head.scratch.output_conv2.0.weight",
+            "depth_head.scratch.output_conv2.0.bias",
+            32,
+            3,
+            1,
+            1,
+            true);
+        operators_.relu(
+            full.buffer,
+            full.buffer,
+            static_cast<std::uint32_t>(
+                elements(full.width, full.height, full.channels)));
+        depth = conv(
+            std::move(full),
+            "depth_head.scratch.output_conv2.2.weight",
+            "depth_head.scratch.output_conv2.2.bias",
+            1,
+            1,
+            1,
+            0,
+            true);
+        operators_.relu(
+            depth.buffer,
+            depth.buffer,
+            depth.width * depth.height);
+    });
     return depth;
 }
 
