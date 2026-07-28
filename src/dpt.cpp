@@ -1,5 +1,8 @@
 #include "dpt.h"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -62,6 +65,61 @@ DptHead::DptHead(
     }
 }
 
+void DptHead::select_convolution_block() {
+    constexpr std::uint32_t side = 16;
+    const VkDeviceSize bytes =
+        elements(side, side, features_) * sizeof(float);
+    VulkanBuffer input = context_.create_device_buffer(bytes);
+    VulkanBuffer output = context_.create_device_buffer(bytes);
+    const VulkanBuffer& convolution_weight = weight(
+        weights_,
+        "depth_head.scratch.refinenet4.resConfUnit2.conv1.weight");
+    const VulkanBuffer& convolution_bias = weight(
+        weights_,
+        "depth_head.scratch.refinenet4.resConfUnit2.conv1.bias");
+    const auto run = [&](bool block8) {
+        const auto start = std::chrono::steady_clock::now();
+        context_.batch([&] {
+            for (int repetition = 0; repetition < 3; ++repetition) {
+                operators_.conv2d(
+                    output,
+                    input,
+                    convolution_weight,
+                    convolution_bias,
+                    side,
+                    side,
+                    features_,
+                    features_,
+                    3,
+                    1,
+                    1,
+                    true,
+                    block8);
+            }
+        });
+        return std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    run(false);
+    run(true);
+    std::array<double, 5> block4{};
+    std::array<double, 5> block8{};
+    for (std::size_t index = 0; index < block4.size(); ++index) {
+        if ((index & 1u) == 0) {
+            block4[index] = run(false);
+            block8[index] = run(true);
+        } else {
+            block8[index] = run(true);
+            block4[index] = run(false);
+        }
+    }
+    std::sort(block4.begin(), block4.end());
+    std::sort(block8.begin(), block8.end());
+    convolution_block8_ =
+        block8[block8.size() / 2] < block4[block4.size() / 2];
+    convolution_block_selected_ = true;
+}
+
 FeatureMap DptHead::conv(
     FeatureMap&& input,
     const std::string& weight_name,
@@ -96,7 +154,7 @@ FeatureMap DptHead::conv(
         stride,
         padding,
         has_bias,
-        features_ >= 256);
+        convolution_block8_);
     return output;
 }
 
@@ -184,6 +242,9 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
     if (encoded.features.size() != 4 ||
         encoded.embedding != embedding_) {
         throw std::invalid_argument("invalid DPT encoder output");
+    }
+    if (!convolution_block_selected_) {
+        select_convolution_block();
     }
     FeatureMap layers[4];
     context_.batch([&] {

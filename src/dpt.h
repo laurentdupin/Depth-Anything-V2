@@ -28,6 +28,8 @@ public:
     FeatureMap forward(EncoderOutput&& encoded);
 
 private:
+    void select_convolution_block();
+
     FeatureMap conv(
         FeatureMap&& input,
         const std::string& weight,
@@ -54,6 +56,8 @@ private:
     std::uint32_t features_ = 0;
     std::uint32_t project_channels_[4]{};
     VulkanBuffer zero_bias_;
+    bool convolution_block_selected_ = false;
+    bool convolution_block8_ = false;
 };
 
 }  // namespace dav2
