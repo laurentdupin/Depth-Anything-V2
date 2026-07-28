@@ -72,6 +72,7 @@ set_target_properties(depth_anything_v2 PROPERTIES
 
 if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
+        src/model.cpp
         src/vulkan.cpp
         src/vulkan_executor.cpp
         "${DAV2_ELEMENTWISE_HEADER}"

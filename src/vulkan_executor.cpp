@@ -1,4 +1,5 @@
 #include "executor.h"
+#include "model.h"
 #include "vulkan.h"
 
 #include <memory>
@@ -11,13 +12,11 @@ namespace {
 class VulkanExecutor final : public Executor {
 public:
     VulkanExecutor(
-        const std::string&,
-        dav2_encoder,
+        const std::string& model_path,
+        dav2_encoder encoder,
         int vulkan_device_index)
-        : context_(static_cast<std::uint32_t>(vulkan_device_index)) {
-        throw std::runtime_error(
-            "custom DAV2 model loading is not implemented yet");
-    }
+        : model_(model_path, encoder),
+          context_(static_cast<std::uint32_t>(vulkan_device_index)) {}
 
     void infer(const float*, int, int, float*) override {
         throw std::runtime_error(
@@ -25,6 +24,7 @@ public:
     }
 
 private:
+    ModelFile model_;
     VulkanContext context_;
 };
 
