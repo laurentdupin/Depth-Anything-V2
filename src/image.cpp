@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace dav2 {
 namespace {
@@ -35,6 +38,41 @@ void cubic_coefficients(float x, float coefficients[4]) {
 
 int clamp_index(int value, int limit) {
     return std::max(0, std::min(value, limit - 1));
+}
+
+template <typename Function>
+void parallel_rows(int rows, Function&& function) {
+    const unsigned available =
+        std::max(1u, std::thread::hardware_concurrency());
+    const unsigned workers = std::min<unsigned>(
+        available, static_cast<unsigned>(rows));
+    if (workers <= 1 || rows < 32) {
+        function(0, rows);
+        return;
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    try {
+        for (unsigned worker = 0; worker < workers; ++worker) {
+            const int begin =
+                static_cast<int>(
+                    std::uint64_t(rows) * worker / workers);
+            const int end =
+                static_cast<int>(
+                    std::uint64_t(rows) * (worker + 1) / workers);
+            threads.emplace_back([&, begin, end] {
+                function(begin, end);
+            });
+        }
+    } catch (...) {
+        for (std::thread& thread : threads) {
+            thread.join();
+        }
+        throw;
+    }
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
 }
 
 }  // namespace
@@ -102,58 +140,66 @@ void preprocess_bgr8(
     // intermediate rows and float coefficients for a CV_64F input.
     std::vector<double> horizontal(
         static_cast<std::size_t>(height) * destination.width * 3);
-    for (int sy = 0; sy < height; ++sy) {
-        const std::uint8_t* row =
-            source + static_cast<std::ptrdiff_t>(sy) * stride;
-        for (int dx = 0; dx < destination.width; ++dx) {
-            const float* alpha =
-                x_coefficients.data() + static_cast<std::size_t>(dx) * 4;
-            const int base = x_indices[dx];
-            for (int channel = 0; channel < 3; ++channel) {
-                double value = 0.0;
-                for (int tap = 0; tap < 4; ++tap) {
-                    const int sx = clamp_index(base - 1 + tap, width);
-                    const std::uint8_t* pixel =
-                        row + static_cast<std::ptrdiff_t>(sx) * 3;
-                    const int bgr_channel = 2 - channel;
-                    const double unit =
-                        static_cast<double>(pixel[bgr_channel]) / 255.0;
-                    value += unit * alpha[tap];
-                }
-                horizontal[
-                    (static_cast<std::size_t>(sy) * destination.width + dx) *
-                        3 +
-                    channel] = value;
-            }
-        }
-    }
-
-    for (int dy = 0; dy < destination.height; ++dy) {
-        const float coordinate =
-            static_cast<float>((dy + 0.5) * scale_y - 0.5);
-        const int base = static_cast<int>(std::floor(coordinate));
-        float beta[4];
-        cubic_coefficients(coordinate - base, beta);
-        for (int dx = 0; dx < destination.width; ++dx) {
-            const std::size_t offset =
-                static_cast<std::size_t>(dy) * destination.width + dx;
-            for (int channel = 0; channel < 3; ++channel) {
-                const auto sample = [&](int tap) {
-                    const int sy = clamp_index(base - 1 + tap, height);
-                    return horizontal[
-                        (static_cast<std::size_t>(sy) * destination.width + dx) *
+    parallel_rows(height, [&](int begin, int end) {
+        for (int sy = begin; sy < end; ++sy) {
+            const std::uint8_t* row =
+                source + static_cast<std::ptrdiff_t>(sy) * stride;
+            for (int dx = 0; dx < destination.width; ++dx) {
+                const float* alpha =
+                    x_coefficients.data() + static_cast<std::size_t>(dx) * 4;
+                const int base = x_indices[dx];
+                for (int channel = 0; channel < 3; ++channel) {
+                    double value = 0.0;
+                    for (int tap = 0; tap < 4; ++tap) {
+                        const int sx = clamp_index(base - 1 + tap, width);
+                        const std::uint8_t* pixel =
+                            row + static_cast<std::ptrdiff_t>(sx) * 3;
+                        const int bgr_channel = 2 - channel;
+                        const double unit =
+                            static_cast<double>(pixel[bgr_channel]) / 255.0;
+                        value += unit * alpha[tap];
+                    }
+                    horizontal[
+                        (static_cast<std::size_t>(sy) *
+                            destination.width + dx) *
                             3 +
-                        channel];
-                };
-                const double resized =
-                    sample(0) * beta[0] + sample(1) * beta[1] +
-                    sample(2) * beta[2] + sample(3) * beta[3];
-                rgb_chw[static_cast<std::size_t>(channel) * plane + offset] =
-                    static_cast<float>(
-                        (resized - mean[channel]) / stddev[channel]);
+                        channel] = value;
+                }
             }
         }
-    }
+    });
+
+    parallel_rows(destination.height, [&](int begin, int end) {
+        for (int dy = begin; dy < end; ++dy) {
+            const float coordinate =
+                static_cast<float>((dy + 0.5) * scale_y - 0.5);
+            const int base = static_cast<int>(std::floor(coordinate));
+            float beta[4];
+            cubic_coefficients(coordinate - base, beta);
+            for (int dx = 0; dx < destination.width; ++dx) {
+                const std::size_t offset =
+                    static_cast<std::size_t>(dy) * destination.width + dx;
+                for (int channel = 0; channel < 3; ++channel) {
+                    const auto sample = [&](int tap) {
+                        const int sy =
+                            clamp_index(base - 1 + tap, height);
+                        return horizontal[
+                            (static_cast<std::size_t>(sy) *
+                                destination.width + dx) *
+                                3 +
+                            channel];
+                    };
+                    const double resized =
+                        sample(0) * beta[0] + sample(1) * beta[1] +
+                        sample(2) * beta[2] + sample(3) * beta[3];
+                    rgb_chw[
+                        static_cast<std::size_t>(channel) * plane + offset] =
+                        static_cast<float>(
+                            (resized - mean[channel]) / stddev[channel]);
+                }
+            }
+        }
+    });
 }
 
 }  // namespace dav2
