@@ -186,8 +186,9 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
         throw std::invalid_argument("invalid DPT encoder output");
     }
     FeatureMap layers[4];
-    for (std::uint32_t index = 0; index < 4; ++index) {
-        context_.batch([&] {
+    context_.batch([&] {
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            context_.batch([&] {
             FeatureMap projected{
                 context_.create_device_buffer(
                     elements(
@@ -249,10 +250,14 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
                     1,
                     true);
             }
-        });
-    }
+            });
+        }
+    });
 
     FeatureMap refined[4];
+    FeatureMap path;
+    FeatureMap depth;
+    context_.batch([&] {
     context_.batch([&] {
         for (std::uint32_t index = 0; index < 4; ++index) {
             const std::string prefix =
@@ -270,7 +275,6 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
         }
     });
 
-    FeatureMap path;
     context_.batch([&] {
         path = fusion(
             std::move(refined[3]),
@@ -304,7 +308,6 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             refined[0].height * 2);
     });
 
-    FeatureMap depth;
     context_.batch([&] {
         path = conv(
             std::move(path),
@@ -361,6 +364,7 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             depth.buffer,
             depth.buffer,
             depth.width * depth.height);
+    });
     });
     return depth;
 }
