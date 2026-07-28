@@ -91,6 +91,8 @@ EncoderOutput DinoEncoder::forward(
         context_.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden =
         context_.create_device_buffer(token_bytes * 4);
+    VulkanBuffer attention_scores = context_.create_device_buffer(
+        std::uint64_t(heads_) * tokens * tokens * sizeof(float));
 
     context_.batch([&] {
         operators_.prepare_tokens(
@@ -113,8 +115,8 @@ EncoderOutput DinoEncoder::forward(
     result.embedding = embedding_;
     std::uint32_t capture_index = 0;
 
-    for (std::uint32_t block = 0; block < blocks_; ++block) {
-        context_.batch([&] {
+    context_.batch([&] {
+        for (std::uint32_t block = 0; block < blocks_; ++block) {
             operators_.layer_norm(
                 normalized,
                 current,
@@ -134,7 +136,7 @@ EncoderOutput DinoEncoder::forward(
                 false,
                 embedding_ >= 1024);
             operators_.attention_head64(
-                attention, qkv, tokens, heads_);
+                attention, qkv, tokens, heads_, &attention_scores);
             operators_.linear(
                 query,
                 attention,
@@ -205,8 +207,8 @@ EncoderOutput DinoEncoder::forward(
                 result.features.push_back(std::move(feature));
                 ++capture_index;
             }
-        });
-    }
+        }
+    });
     if (result.features.size() != 4) {
         throw std::runtime_error("encoder did not produce four features");
     }

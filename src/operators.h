@@ -42,7 +42,8 @@ public:
         VulkanBuffer& output,
         const VulkanBuffer& qkv,
         std::uint32_t tokens,
-        std::uint32_t heads);
+        std::uint32_t heads,
+        VulkanBuffer* score_scratch = nullptr);
 
     void prepare_tokens(
         VulkanBuffer& output,

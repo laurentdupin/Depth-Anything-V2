@@ -210,7 +210,8 @@ void VulkanOperators::attention_head64(
     VulkanBuffer& output,
     const VulkanBuffer& qkv,
     std::uint32_t tokens,
-    std::uint32_t heads) {
+    std::uint32_t heads,
+    VulkanBuffer* score_scratch) {
     if (tokens == 0 || heads == 0) {
         throw std::invalid_argument("invalid attention dimensions");
     }
@@ -220,8 +221,16 @@ void VulkanOperators::attention_head64(
     require_bytes(qkv, elements * 3, "QKV");
     const std::uint64_t score_elements =
         std::uint64_t(heads) * tokens * tokens;
-    VulkanBuffer scores =
-        context_.create_device_buffer(score_elements * sizeof(float));
+    VulkanBuffer owned_scores;
+    if (score_scratch == nullptr) {
+        owned_scores =
+            context_.create_device_buffer(score_elements * sizeof(float));
+        score_scratch = &owned_scores;
+    } else {
+        require_bytes(
+            *score_scratch, score_elements, "attention score scratch");
+    }
+    VulkanBuffer& scores = *score_scratch;
     struct BmmParameters {
         std::uint32_t rows;
         std::uint32_t columns;
