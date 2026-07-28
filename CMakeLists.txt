@@ -29,8 +29,9 @@ if(DAV2_WITH_VULKAN)
             OUTPUT "${SPIRV}"
             COMMAND Vulkan::glslc -fshader-stage=compute
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
                 -o "${SPIRV}" "${SOURCE}"
-            DEPENDS "${SOURCE}"
+            DEPENDS "${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
             VERBATIM
         )
         add_custom_command(

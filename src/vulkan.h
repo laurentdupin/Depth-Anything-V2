@@ -47,7 +47,7 @@ private:
     VkDescriptorSetLayout descriptor_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
-    std::uint32_t binding_count_ = 0;
+    std::vector<VkDescriptorType> descriptor_types_;
     std::uint32_t push_constant_bytes_ = 0;
 };
 
@@ -72,6 +72,11 @@ public:
         const std::uint32_t* spirv,
         std::size_t spirv_bytes,
         std::uint32_t binding_count,
+        std::uint32_t push_constant_bytes);
+    VulkanPipeline create_pipeline(
+        const std::uint32_t* spirv,
+        std::size_t spirv_bytes,
+        const std::vector<VkDescriptorType>& descriptor_types,
         std::uint32_t push_constant_bytes);
 
     void dispatch(

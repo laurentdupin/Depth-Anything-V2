@@ -56,7 +56,7 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
             std::exchange(other.descriptor_layout_, VK_NULL_HANDLE);
         layout_ = std::exchange(other.layout_, VK_NULL_HANDLE);
         pipeline_ = std::exchange(other.pipeline_, VK_NULL_HANDLE);
-        binding_count_ = std::exchange(other.binding_count_, 0);
+        descriptor_types_ = std::move(other.descriptor_types_);
         push_constant_bytes_ = std::exchange(other.push_constant_bytes_, 0);
     }
     return *this;
@@ -162,17 +162,17 @@ VulkanContext::VulkanContext(std::uint32_t device_index) {
             device_, &command_pool_info, nullptr, &command_pool_),
         "vkCreateCommandPool");
 
-    const VkDescriptorPoolSize pool_size{
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        4096,
+    const VkDescriptorPoolSize pool_sizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
     };
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
         VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
         1024,
-        1,
-        &pool_size,
+        2,
+        pool_sizes,
     };
     check(
         vkCreateDescriptorPool(
@@ -271,7 +271,8 @@ VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
         bytes,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
@@ -355,22 +356,36 @@ VulkanPipeline VulkanContext::create_pipeline(
     std::size_t spirv_bytes,
     std::uint32_t binding_count,
     std::uint32_t push_constant_bytes) {
+    return create_pipeline(
+        spirv,
+        spirv_bytes,
+        std::vector<VkDescriptorType>(
+            binding_count, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        push_constant_bytes);
+}
+
+VulkanPipeline VulkanContext::create_pipeline(
+    const std::uint32_t* spirv,
+    std::size_t spirv_bytes,
+    const std::vector<VkDescriptorType>& descriptor_types,
+    std::uint32_t push_constant_bytes) {
     if (spirv == nullptr || spirv_bytes == 0 || spirv_bytes % 4 != 0 ||
-        binding_count == 0 ||
+        descriptor_types.empty() ||
         push_constant_bytes > 128 ||
         push_constant_bytes % 4 != 0) {
         throw std::invalid_argument("invalid compute pipeline description");
     }
     VulkanPipeline result;
     result.owner_ = this;
-    result.binding_count_ = binding_count;
+    result.descriptor_types_ = descriptor_types;
     result.push_constant_bytes_ = push_constant_bytes;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(binding_count);
-    for (std::uint32_t index = 0; index < binding_count; ++index) {
+    std::vector<VkDescriptorSetLayoutBinding> bindings(
+        descriptor_types.size());
+    for (std::uint32_t index = 0; index < descriptor_types.size(); ++index) {
         bindings[index] = {
             index,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            descriptor_types[index],
             1,
             VK_SHADER_STAGE_COMPUTE_BIT,
             nullptr,
@@ -380,7 +395,7 @@ VulkanPipeline VulkanContext::create_pipeline(
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         nullptr,
         0,
-        binding_count,
+        static_cast<std::uint32_t>(bindings.size()),
         bindings.data(),
     };
     check(
@@ -463,7 +478,7 @@ void VulkanContext::dispatch(
     std::uint32_t group_y,
     std::uint32_t group_z) {
     if (pipeline.owner_ != this ||
-        buffers.size() != pipeline.binding_count_ ||
+        buffers.size() != pipeline.descriptor_types_.size() ||
         push_constant_bytes != pipeline.push_constant_bytes_ ||
         (push_constant_bytes && push_constants == nullptr) ||
         group_x == 0 || group_y == 0 || group_z == 0) {
@@ -502,7 +517,7 @@ void VulkanContext::dispatch(
             static_cast<std::uint32_t>(index),
             0,
             1,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            pipeline.descriptor_types_[index],
             nullptr,
             &buffer_info[index],
             nullptr,
@@ -576,6 +591,7 @@ void VulkanContext::destroy(VulkanPipeline& pipeline) noexcept {
     pipeline.pipeline_ = VK_NULL_HANDLE;
     pipeline.layout_ = VK_NULL_HANDLE;
     pipeline.descriptor_layout_ = VK_NULL_HANDLE;
+    pipeline.descriptor_types_.clear();
 }
 
 }  // namespace dav2

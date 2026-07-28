@@ -71,8 +71,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       position_bicubic_(context.create_pipeline(
           dav2_position_bicubic_spv,
           dav2_position_bicubic_spv_size,
-          2,
-          20)),
+          {
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          },
+          0)),
       add_position_(context.create_pipeline(
           dav2_add_position_spv,
           dav2_add_position_spv_size,
@@ -381,32 +387,68 @@ void VulkanOperators::prepare_tokens(
         sizeof(parameters),
         divide_up(embedding, 8),
         divide_up(static_cast<std::uint32_t>(tokens), 8));
-    struct PositionParameters {
-        std::uint32_t patch_width;
-        std::uint32_t patch_height;
-        std::uint32_t embedding;
-        float scale_x;
-        float scale_y;
-    } position_parameters{
-        patch_width,
-        patch_height,
-        embedding,
-        static_cast<float>(
-            1.0 /
-            ((static_cast<double>(patch_width) + 0.1) / 37.0)),
-        static_cast<float>(
-            1.0 /
-            ((static_cast<double>(patch_height) + 0.1) / 37.0)),
+    struct BufferMetadata {
+        std::uint32_t logical_sizes[4];
+        std::uint32_t logical_strides[4];
+        std::uint32_t physical_strides[4];
+        std::uint32_t info[4];
     };
+    const std::uint32_t spatial = patch_width * patch_height;
+    const BufferMetadata output_metadata{
+        {patch_width, patch_height, embedding, 1},
+        {1, patch_width, spatial, spatial * embedding},
+        {1, patch_width, spatial, spatial * embedding},
+        {4, spatial * embedding, spatial * embedding, 0},
+    };
+    const BufferMetadata input_metadata{
+        {37, 37, embedding, 1},
+        {1, 37, 37 * 37, 37 * 37 * embedding},
+        {embedding, 37 * embedding, 1, 1370 * embedding},
+        {4, 1369 * embedding, 1370 * embedding, embedding},
+    };
+    struct PositionBlock {
+        std::int32_t info[4];
+        float scale[4];
+    };
+    const PositionBlock position_block{
+        {36, 36,
+         static_cast<std::int32_t>(patch_width),
+         static_cast<std::int32_t>(patch_height)},
+        {
+            static_cast<float>(
+                1.0 /
+                ((static_cast<double>(patch_width) + 0.1) / 37.0)),
+            static_cast<float>(
+                1.0 /
+                ((static_cast<double>(patch_height) + 0.1) / 37.0)),
+            0.0f,
+            0.0f,
+        },
+    };
+    VulkanBuffer output_metadata_buffer =
+        context_.create_host_buffer(sizeof(output_metadata));
+    VulkanBuffer input_metadata_buffer =
+        context_.create_host_buffer(sizeof(input_metadata));
+    VulkanBuffer position_block_buffer =
+        context_.create_host_buffer(sizeof(position_block));
+    context_.upload(
+        output_metadata_buffer, &output_metadata, sizeof(output_metadata));
+    context_.upload(
+        input_metadata_buffer, &input_metadata, sizeof(input_metadata));
+    context_.upload(
+        position_block_buffer, &position_block, sizeof(position_block));
     context_.dispatch(
         position_bicubic_,
-        {&interpolated, &position},
-        &position_parameters,
-        sizeof(position_parameters),
-        divide_up(
-            static_cast<std::uint32_t>(
-                (tokens - 1) * embedding),
-            256));
+        {
+            &interpolated,
+            &output_metadata_buffer,
+            &position,
+            &input_metadata_buffer,
+            &position_block_buffer,
+        },
+        nullptr,
+        0,
+        divide_up(spatial * embedding, 256));
     struct AddPositionParameters {
         std::uint32_t patch_width;
         std::uint32_t patch_height;
