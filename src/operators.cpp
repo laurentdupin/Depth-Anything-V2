@@ -2,13 +2,19 @@
 
 #include "add_scaled_spv.h"
 #include "add_spv.h"
+#include "add_position_spv.h"
+#include "bilinear_align_true_spv.h"
 #include "bmm_spv.h"
+#include "conv2d_spv.h"
+#include "conv_transpose_nonoverlap_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
 #include "merge_heads_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
+#include "project_tokens_spv.h"
+#include "relu_spv.h"
 #include "split_qkv_spv.h"
 #include "softmax_lastdim_spv.h"
 
@@ -67,8 +73,32 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_position_bicubic_spv_size,
           2,
           20)),
+      add_position_(context.create_pipeline(
+          dav2_add_position_spv,
+          dav2_add_position_spv_size,
+          4,
+          16)),
       add_(context.create_pipeline(
-          dav2_add_spv, dav2_add_spv_size, 3, 4)) {}
+          dav2_add_spv, dav2_add_spv_size, 3, 4)),
+      project_tokens_(context.create_pipeline(
+          dav2_project_tokens_spv,
+          dav2_project_tokens_spv_size,
+          4,
+          16)),
+      conv2d_(context.create_pipeline(
+          dav2_conv2d_spv, dav2_conv2d_spv_size, 4, 40)),
+      conv_transpose_nonoverlap_(context.create_pipeline(
+          dav2_conv_transpose_nonoverlap_spv,
+          dav2_conv_transpose_nonoverlap_spv_size,
+          4,
+          20)),
+      bilinear_align_true_(context.create_pipeline(
+          dav2_bilinear_align_true_spv,
+          dav2_bilinear_align_true_spv_size,
+          2,
+          20)),
+      relu_(context.create_pipeline(
+          dav2_relu_spv, dav2_relu_spv_size, 2, 4)) {}
 
 void VulkanOperators::linear(
     VulkanBuffer& output,
@@ -373,18 +403,237 @@ void VulkanOperators::prepare_tokens(
         {&interpolated, &position},
         &position_parameters,
         sizeof(position_parameters),
-        divide_up(static_cast<std::uint32_t>(tokens * embedding), 256));
-    struct AddParameters {
+        divide_up(
+            static_cast<std::uint32_t>(
+                (tokens - 1) * embedding),
+            256));
+    struct AddPositionParameters {
+        std::uint32_t patch_width;
+        std::uint32_t patch_height;
+        std::uint32_t embedding;
         std::uint32_t count;
     } add_parameters{
+        patch_width,
+        patch_height,
+        embedding,
         static_cast<std::uint32_t>(tokens * embedding),
     };
     context_.dispatch(
-        add_,
-        {&output, &output, &interpolated},
+        add_position_,
+        {&output, &output, &interpolated, &position},
         &add_parameters,
         sizeof(add_parameters),
         divide_up(add_parameters.count, 256));
+}
+
+void VulkanOperators::project_tokens(
+    VulkanBuffer& output,
+    const VulkanBuffer& tokens,
+    const VulkanBuffer& weight,
+    const VulkanBuffer& bias,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t embedding,
+    std::uint32_t output_channels) {
+    if (width == 0 || height == 0 || embedding == 0 ||
+        output_channels == 0) {
+        throw std::invalid_argument("invalid token projection dimensions");
+    }
+    require_bytes(
+        tokens,
+        (std::uint64_t(width) * height + 1) * embedding,
+        "tokens");
+    require_bytes(
+        weight, std::uint64_t(output_channels) * embedding, "weight");
+    require_bytes(bias, output_channels, "bias");
+    require_bytes(
+        output,
+        std::uint64_t(width) * height * output_channels,
+        "output");
+    struct Parameters {
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t embedding;
+        std::uint32_t output_channels;
+    } parameters{width, height, embedding, output_channels};
+    context_.dispatch(
+        project_tokens_,
+        {&output, &tokens, &weight, &bias},
+        &parameters,
+        sizeof(parameters),
+        divide_up(width, 8),
+        divide_up(height, 8),
+        output_channels);
+}
+
+void VulkanOperators::conv2d(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& weight,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel,
+    std::uint32_t stride,
+    std::uint32_t padding,
+    bool has_bias) {
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0 || stride == 0 ||
+        input_width + 2 * padding < kernel ||
+        input_height + 2 * padding < kernel) {
+        throw std::invalid_argument("invalid convolution dimensions");
+    }
+    const std::uint32_t output_width =
+        (input_width + 2 * padding - kernel) / stride + 1;
+    const std::uint32_t output_height =
+        (input_height + 2 * padding - kernel) / stride + 1;
+    require_bytes(
+        input,
+        std::uint64_t(input_width) * input_height * input_channels,
+        "convolution input");
+    require_bytes(
+        weight,
+        std::uint64_t(output_channels) * input_channels * kernel * kernel,
+        "convolution weight");
+    require_bytes(bias, has_bias ? output_channels : 1, "convolution bias");
+    require_bytes(
+        output,
+        std::uint64_t(output_width) * output_height * output_channels,
+        "convolution output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+        std::uint32_t output_channels;
+        std::uint32_t kernel;
+        std::uint32_t stride;
+        std::int32_t padding;
+        std::uint32_t has_bias;
+    } parameters{
+        input_width, input_height, input_channels,
+        output_width, output_height, output_channels,
+        kernel, stride, static_cast<std::int32_t>(padding),
+        has_bias ? 1u : 0u,
+    };
+    context_.dispatch(
+        conv2d_,
+        {&output, &input, &weight, &bias},
+        &parameters,
+        sizeof(parameters),
+        divide_up(output_width, 8),
+        divide_up(output_height, 8),
+        output_channels);
+}
+
+void VulkanOperators::conv_transpose_nonoverlap(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& weight,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel) {
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0) {
+        throw std::invalid_argument("invalid transposed convolution dimensions");
+    }
+    const std::uint32_t output_width = input_width * kernel;
+    const std::uint32_t output_height = input_height * kernel;
+    require_bytes(
+        input,
+        std::uint64_t(input_width) * input_height * input_channels,
+        "transposed convolution input");
+    require_bytes(
+        weight,
+        std::uint64_t(input_channels) * output_channels * kernel * kernel,
+        "transposed convolution weight");
+    require_bytes(bias, output_channels, "transposed convolution bias");
+    require_bytes(
+        output,
+        std::uint64_t(output_width) * output_height * output_channels,
+        "transposed convolution output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_channels;
+        std::uint32_t kernel;
+    } parameters{
+        input_width, input_height, input_channels, output_channels, kernel};
+    context_.dispatch(
+        conv_transpose_nonoverlap_,
+        {&output, &input, &weight, &bias},
+        &parameters,
+        sizeof(parameters),
+        divide_up(output_width, 8),
+        divide_up(output_height, 8),
+        output_channels);
+}
+
+void VulkanOperators::bilinear_align_true(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t output_width,
+    std::uint32_t output_height,
+    std::uint32_t channels) {
+    if (input_width == 0 || input_height == 0 || output_width == 0 ||
+        output_height == 0 || channels == 0) {
+        throw std::invalid_argument("invalid bilinear dimensions");
+    }
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * channels,
+        "bilinear input");
+    require_bytes(
+        output, std::uint64_t(output_width) * output_height * channels,
+        "bilinear output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+        std::uint32_t channels;
+    } parameters{
+        input_width, input_height, output_width, output_height, channels};
+    context_.dispatch(
+        bilinear_align_true_,
+        {&output, &input},
+        &parameters,
+        sizeof(parameters),
+        divide_up(output_width, 8),
+        divide_up(output_height, 8),
+        channels);
+}
+
+void VulkanOperators::relu(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t count) {
+    require_bytes(output, count, "ReLU output");
+    require_bytes(input, count, "ReLU input");
+    context_.dispatch(
+        relu_, {&output, &input}, &count, sizeof(count),
+        divide_up(count, 256));
+}
+
+void VulkanOperators::add(
+    VulkanBuffer& output,
+    const VulkanBuffer& left,
+    const VulkanBuffer& right,
+    std::uint32_t count) {
+    require_bytes(output, count, "add output");
+    require_bytes(left, count, "add left");
+    require_bytes(right, count, "add right");
+    context_.dispatch(
+        add_, {&output, &left, &right}, &count, sizeof(count),
+        divide_up(count, 256));
 }
 
 }  // namespace dav2

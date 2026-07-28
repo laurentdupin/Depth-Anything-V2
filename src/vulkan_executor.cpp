@@ -1,5 +1,6 @@
 #include "executor.h"
 #include "encoder.h"
+#include "dpt.h"
 #include "gpu_model.h"
 #include "model.h"
 #include "operators.h"
@@ -22,9 +23,10 @@ public:
           context_(static_cast<std::uint32_t>(vulkan_device_index)),
           weights_(model_, context_),
           operators_(context_),
-          encoder_(encoder, context_, weights_, operators_) {}
+          encoder_(encoder, context_, weights_, operators_),
+          dpt_(encoder, context_, weights_, operators_) {}
 
-    void infer(const float* input, int width, int height, float*) override {
+    void infer(const float* input, int width, int height, float* output) override {
         const std::size_t input_elements =
             static_cast<std::size_t>(width) * height * 3;
         VulkanBuffer image =
@@ -35,9 +37,11 @@ public:
             image,
             static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height));
-        (void)encoded;
-        throw std::runtime_error(
-            "custom DAV2 DPT head is not implemented yet");
+        FeatureMap depth = dpt_.forward(std::move(encoded));
+        context_.download(
+            depth.buffer,
+            output,
+            static_cast<std::size_t>(width) * height * sizeof(float));
     }
 
 private:
@@ -46,6 +50,7 @@ private:
     GpuModel weights_;
     VulkanOperators operators_;
     DinoEncoder encoder_;
+    DptHead dpt_;
 };
 
 }  // namespace

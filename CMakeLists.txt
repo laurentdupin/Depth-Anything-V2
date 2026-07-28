@@ -55,9 +55,15 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(merge_heads)
     dav2_compile_shader(prepare_tokens)
     dav2_compile_shader(position_bicubic)
+    dav2_compile_shader(add_position)
     dav2_compile_shader(add)
     dav2_compile_shader(bmm)
     dav2_compile_shader(softmax_lastdim)
+    dav2_compile_shader(project_tokens)
+    dav2_compile_shader(conv2d)
+    dav2_compile_shader(conv_transpose_nonoverlap)
+    dav2_compile_shader(bilinear_align_true)
+    dav2_compile_shader(relu)
 endif()
 
 add_library(depth_anything_v2 SHARED
@@ -89,6 +95,7 @@ if(DAV2_WITH_VULKAN)
         src/model.cpp
         src/gpu_model.cpp
         src/encoder.cpp
+        src/dpt.cpp
         src/operators.cpp
         src/vulkan.cpp
         src/vulkan_executor.cpp
@@ -115,6 +122,7 @@ if(DAV2_BUILD_TOOLS)
         add_executable(dav2_encoder_probe
             tools/dav2_encoder_probe.cpp
             src/encoder.cpp
+            src/dpt.cpp
             src/gpu_model.cpp
             src/model.cpp
             src/operators.cpp

@@ -70,6 +70,58 @@ public:
         std::uint32_t input_height,
         std::uint32_t embedding);
 
+    void project_tokens(
+        VulkanBuffer& output,
+        const VulkanBuffer& tokens,
+        const VulkanBuffer& weight,
+        const VulkanBuffer& bias,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t embedding,
+        std::uint32_t output_channels);
+
+    void conv2d(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& weight,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel,
+        std::uint32_t stride,
+        std::uint32_t padding,
+        bool has_bias);
+
+    void conv_transpose_nonoverlap(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& weight,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel);
+
+    void bilinear_align_true(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t output_width,
+        std::uint32_t output_height,
+        std::uint32_t channels);
+
+    void relu(VulkanBuffer& output, const VulkanBuffer& input, std::uint32_t count);
+
+    void add(
+        VulkanBuffer& output,
+        const VulkanBuffer& left,
+        const VulkanBuffer& right,
+        std::uint32_t count);
+
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
@@ -82,7 +134,13 @@ private:
     VulkanPipeline merge_heads_;
     VulkanPipeline prepare_tokens_;
     VulkanPipeline position_bicubic_;
+    VulkanPipeline add_position_;
     VulkanPipeline add_;
+    VulkanPipeline project_tokens_;
+    VulkanPipeline conv2d_;
+    VulkanPipeline conv_transpose_nonoverlap_;
+    VulkanPipeline bilinear_align_true_;
+    VulkanPipeline relu_;
 };
 
 }  // namespace dav2
