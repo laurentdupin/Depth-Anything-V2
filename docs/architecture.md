@@ -66,9 +66,15 @@ Average complete image inference times were:
 
 | Encoder | Native DLL | PyTorch CPU | Native speedup |
 |---|---:|---:|---:|
-| ViT-S | 0.358 s | 0.726 s | 2.03x |
-| ViT-B | 0.818 s | 2.330 s | 2.85x |
-| ViT-L | 2.864 s | 6.464 s | 2.26x |
+| ViT-S | 0.122 s | 0.726 s | 5.95x |
+| ViT-B | 0.255 s | 2.330 s | 9.14x |
+| ViT-L | 0.693 s | 6.464 s | 9.33x |
+
+These native figures are the average of all 20 images through one persistent
+context. The same run completed the suite in 2.437 s, 5.093 s, and 13.853 s
+for ViT-S, ViT-B, and ViT-L respectively. Runtime optimizations preserve the
+compatibility operation order; the final S/B/L outputs remain bit-identical to
+the stored Python Vulkan references.
 
 `tools/compare_assets.py` reproduces the test and writes per-image CSV results
 and native depth previews. The DA-2K benchmark poster and project teaser are
