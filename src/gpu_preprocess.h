@@ -25,10 +25,16 @@ public:
         std::uint32_t destination_height,
         GpuPixelOrder order,
         const VulkanSemaphore* wait = nullptr);
+    void run_texture(
+        VulkanBuffer& destination,
+        const VulkanImage& source,
+        std::uint32_t destination_width,
+        std::uint32_t destination_height);
 
 private:
     VulkanContext& context_;
     VulkanPipeline pipeline_;
+    VulkanPipeline texture_pipeline_;
 };
 
 }  // namespace dav2

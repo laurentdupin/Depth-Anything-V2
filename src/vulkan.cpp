@@ -128,6 +128,30 @@ VulkanBuffer::~VulkanBuffer() {
     if (owner_) owner_->destroy(*this);
 }
 
+VulkanImage::VulkanImage(VulkanImage&& other) noexcept {
+    *this = std::move(other);
+}
+
+VulkanImage& VulkanImage::operator=(VulkanImage&& other) noexcept {
+    if (this != &other) {
+        if (owner_) owner_->destroy(*this);
+        owner_ = std::exchange(other.owner_, nullptr);
+        image_ = std::exchange(other.image_, VK_NULL_HANDLE);
+        memory_ = std::exchange(other.memory_, VK_NULL_HANDLE);
+        view_ = std::exchange(other.view_, VK_NULL_HANDLE);
+        sampler_ = std::exchange(other.sampler_, VK_NULL_HANDLE);
+        format_ = std::exchange(
+            other.format_, VK_FORMAT_UNDEFINED);
+        width_ = std::exchange(other.width_, 0);
+        height_ = std::exchange(other.height_, 0);
+    }
+    return *this;
+}
+
+VulkanImage::~VulkanImage() {
+    if (owner_) owner_->destroy(*this);
+}
+
 VulkanPipeline::VulkanPipeline(VulkanPipeline&& other) noexcept {
     *this = std::move(other);
 }
@@ -243,6 +267,57 @@ VulkanContext::VulkanContext(std::uint32_t device_index) try {
             (external_properties.externalMemoryProperties
                  .externalMemoryFeatures &
              VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+        const auto image_importable =
+            [&](VkFormat format, VkImageUsageFlags usage) {
+                const VkPhysicalDeviceExternalImageFormatInfo external{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+                    nullptr,
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+                };
+                const VkPhysicalDeviceImageFormatInfo2 image_info{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+                    &external,
+                    format,
+                    VK_IMAGE_TYPE_2D,
+                    VK_IMAGE_TILING_OPTIMAL,
+                    usage,
+                    0,
+                };
+                VkExternalImageFormatProperties external_properties{
+                    VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+                };
+                VkImageFormatProperties2 image_properties{
+                    VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+                    &external_properties,
+                };
+                const VkResult queried =
+                    vkGetPhysicalDeviceImageFormatProperties2(
+                        physical_device_,
+                        &image_info,
+                        &image_properties);
+                return queried == VK_SUCCESS &&
+                    (external_properties.externalMemoryProperties
+                         .externalMemoryFeatures &
+                     VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+            };
+        external_capabilities_
+            .d3d12_bgra8_sampled_image_import =
+            image_importable(
+                VK_FORMAT_B8G8R8A8_UNORM,
+                VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        external_capabilities_
+            .d3d12_rgba8_sampled_image_import =
+            image_importable(
+                VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        external_capabilities_
+            .d3d12_r32_storage_image_import =
+            image_importable(
+                VK_FORMAT_R32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
         enabled_extensions.push_back(
             VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
     }
@@ -590,6 +665,174 @@ VulkanBuffer VulkanContext::import_d3d12_buffer(
             vkBindBufferMemory(
                 device_, result.buffer_, result.memory_, 0),
             "vkBindBufferMemory(D3D12 import)");
+        return result;
+    } catch (...) {
+        if (duplicated != nullptr) CloseHandle(duplicated);
+        throw;
+    }
+}
+
+VulkanImage VulkanContext::import_d3d12_image(
+    void* shared_handle,
+    std::uint32_t width,
+    std::uint32_t height,
+    VkFormat format,
+    VkImageUsageFlags usage) {
+    if (!external_capabilities_.d3d12_resource_import) {
+        throw std::runtime_error(
+            "Vulkan device cannot import D3D12 resources");
+    }
+    if (shared_handle == nullptr || width == 0 || height == 0 ||
+        format == VK_FORMAT_UNDEFINED ||
+        (usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
+                  VK_IMAGE_USAGE_STORAGE_BIT)) == 0) {
+        throw std::invalid_argument(
+            "invalid D3D12 shared image");
+    }
+    HANDLE duplicated = nullptr;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            static_cast<HANDLE>(shared_handle),
+            GetCurrentProcess(),
+            &duplicated,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS)) {
+        throw std::runtime_error(
+            "failed to duplicate D3D12 image handle");
+    }
+
+    VulkanImage result;
+    result.owner_ = this;
+    result.format_ = format;
+    result.width_ = width;
+    result.height_ = height;
+    const VkExternalMemoryImageCreateInfo external_image{
+        VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        nullptr,
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+    };
+    const VkImageCreateInfo image_info{
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        &external_image,
+        0,
+        VK_IMAGE_TYPE_2D,
+        format,
+        {width, height, 1},
+        1,
+        1,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL,
+        usage,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    try {
+        check(
+            vkCreateImage(
+                device_, &image_info, nullptr, &result.image_),
+            "vkCreateImage(D3D12 import)");
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(
+            device_, result.image_, &requirements);
+        VkMemoryWin32HandlePropertiesKHR handle_properties{
+            VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR,
+        };
+        check(
+            get_memory_win32_handle_properties_(
+                device_,
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+                duplicated,
+                &handle_properties),
+            "vkGetMemoryWin32HandlePropertiesKHR(image)");
+        const VkMemoryDedicatedAllocateInfo dedicated{
+            VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            nullptr,
+            result.image_,
+            VK_NULL_HANDLE,
+        };
+        const VkImportMemoryWin32HandleInfoKHR import{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+            &dedicated,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+            duplicated,
+            nullptr,
+        };
+        const VkMemoryAllocateInfo allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            &import,
+            requirements.size,
+            find_memory_type(
+                requirements.memoryTypeBits &
+                    handle_properties.memoryTypeBits,
+                0),
+        };
+        check(
+            vkAllocateMemory(
+                device_, &allocation, nullptr, &result.memory_),
+            "vkAllocateMemory(D3D12 image import)");
+        CloseHandle(duplicated);
+        duplicated = nullptr;
+        check(
+            vkBindImageMemory(
+                device_, result.image_, result.memory_, 0),
+            "vkBindImageMemory(D3D12 import)");
+        const VkImageViewCreateInfo view_info{
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            nullptr,
+            0,
+            result.image_,
+            VK_IMAGE_VIEW_TYPE_2D,
+            format,
+            {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1,
+            },
+        };
+        check(
+            vkCreateImageView(
+                device_, &view_info, nullptr, &result.view_),
+            "vkCreateImageView(D3D12 import)");
+        if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
+            const VkSamplerCreateInfo sampler_info{
+                VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                nullptr,
+                0,
+                VK_FILTER_NEAREST,
+                VK_FILTER_NEAREST,
+                VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                0.0f,
+                VK_FALSE,
+                1.0f,
+                VK_FALSE,
+                VK_COMPARE_OP_ALWAYS,
+                0.0f,
+                0.0f,
+                VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+                VK_FALSE,
+            };
+            check(
+                vkCreateSampler(
+                    device_,
+                    &sampler_info,
+                    nullptr,
+                    &result.sampler_),
+                "vkCreateSampler(D3D12 import)");
+        }
         return result;
     } catch (...) {
         if (duplicated != nullptr) CloseHandle(duplicated);
@@ -1010,6 +1253,88 @@ void VulkanContext::release_external_buffer(
         nullptr);
 }
 
+void VulkanContext::acquire_external_image(
+    const VulkanImage& image,
+    VkImageLayout layout,
+    VkAccessFlags destination_access) {
+    if (batch_command_ == VK_NULL_HANDLE ||
+        image.owner_ != this ||
+        image.image_ == VK_NULL_HANDLE) {
+        throw std::invalid_argument(
+            "external image acquire requires an active batch");
+    }
+    const VkImageMemoryBarrier barrier{
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        nullptr,
+        0,
+        destination_access,
+        VK_IMAGE_LAYOUT_GENERAL,
+        layout,
+        VK_QUEUE_FAMILY_EXTERNAL,
+        queue_family_,
+        image.image_,
+        {
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0,
+            1,
+            0,
+            1,
+        },
+    };
+    vkCmdPipelineBarrier(
+        batch_command_,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+}
+
+void VulkanContext::release_external_image(
+    const VulkanImage& image,
+    VkImageLayout layout,
+    VkAccessFlags source_access) {
+    if (batch_command_ == VK_NULL_HANDLE ||
+        image.owner_ != this ||
+        image.image_ == VK_NULL_HANDLE) {
+        throw std::invalid_argument(
+            "external image release requires an active batch");
+    }
+    const VkImageMemoryBarrier barrier{
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        nullptr,
+        source_access,
+        0,
+        layout,
+        VK_IMAGE_LAYOUT_GENERAL,
+        queue_family_,
+        VK_QUEUE_FAMILY_EXTERNAL,
+        image.image_,
+        {
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0,
+            1,
+            0,
+            1,
+        },
+    };
+    vkCmdPipelineBarrier(
+        batch_command_,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+}
+
 VulkanPipeline VulkanContext::create_pipeline(
     const std::uint32_t* spirv,
     std::size_t spirv_bytes,
@@ -1137,8 +1462,73 @@ void VulkanContext::dispatch(
     std::uint32_t group_y,
     std::uint32_t group_z,
     const VulkanSemaphore* wait) {
+    std::vector<VulkanDispatchResource> resources;
+    resources.reserve(buffers.size());
+    for (const VulkanBuffer* buffer : buffers) {
+        resources.push_back({buffer, nullptr});
+    }
+    dispatch_resources(
+        pipeline,
+        resources,
+        push_constants,
+        push_constant_bytes,
+        group_x,
+        group_y,
+        group_z,
+        wait);
+}
+
+void VulkanContext::dispatch_image_to_buffer(
+    const VulkanPipeline& pipeline,
+    const VulkanImage& image,
+    VulkanBuffer& buffer,
+    const void* push_constants,
+    std::uint32_t push_constant_bytes,
+    std::uint32_t group_x,
+    std::uint32_t group_y,
+    std::uint32_t group_z) {
+    dispatch_resources(
+        pipeline,
+        {{nullptr, &image}, {&buffer, nullptr}},
+        push_constants,
+        push_constant_bytes,
+        group_x,
+        group_y,
+        group_z,
+        nullptr);
+}
+
+void VulkanContext::dispatch_buffer_to_image(
+    const VulkanPipeline& pipeline,
+    const VulkanBuffer& buffer,
+    VulkanImage& image,
+    const void* push_constants,
+    std::uint32_t push_constant_bytes,
+    std::uint32_t group_x,
+    std::uint32_t group_y,
+    std::uint32_t group_z) {
+    dispatch_resources(
+        pipeline,
+        {{nullptr, &image}, {&buffer, nullptr}},
+        push_constants,
+        push_constant_bytes,
+        group_x,
+        group_y,
+        group_z,
+        nullptr);
+}
+
+void VulkanContext::dispatch_resources(
+    const VulkanPipeline& pipeline,
+    const std::vector<VulkanDispatchResource>& resources,
+    const void* push_constants,
+    std::uint32_t push_constant_bytes,
+    std::uint32_t group_x,
+    std::uint32_t group_y,
+    std::uint32_t group_z,
+    const VulkanSemaphore* wait) {
     if (pipeline.owner_ != this ||
-        buffers.size() != pipeline.descriptor_types_.size() ||
+        resources.size() != pipeline.descriptor_types_.size() ||
         push_constant_bytes != pipeline.push_constant_bytes_ ||
         (push_constant_bytes && push_constants == nullptr) ||
         group_x == 0 || group_y == 0 || group_z == 0) {
@@ -1162,17 +1552,59 @@ void VulkanContext::dispatch(
                 device_, &allocate_info, &descriptor_set),
             "vkAllocateDescriptorSets");
     }
-    std::vector<VkDescriptorBufferInfo> buffer_info(buffers.size());
-    std::vector<VkWriteDescriptorSet> writes(buffers.size());
-    for (std::size_t index = 0; index < buffers.size(); ++index) {
-        if (buffers[index] == nullptr || buffers[index]->owner_ != this) {
+    std::vector<VkDescriptorBufferInfo> buffer_info(resources.size());
+    std::vector<VkDescriptorImageInfo> image_info(resources.size());
+    std::vector<VkWriteDescriptorSet> writes(resources.size());
+    for (std::size_t index = 0; index < resources.size(); ++index) {
+        const VkDescriptorType type =
+            pipeline.descriptor_types_[index];
+        const bool image_descriptor =
+            type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+            type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+            type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        if (image_descriptor) {
+            const VulkanImage* image = resources[index].image;
+            if (image == nullptr || image->owner_ != this ||
+                image->view_ == VK_NULL_HANDLE ||
+                (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+                 image->sampler_ == VK_NULL_HANDLE)) {
+                pipeline.cached_descriptor_sets_.push_back(
+                    descriptor_set);
+                throw std::invalid_argument(
+                    "foreign or invalid Vulkan image");
+            }
+            image_info[index] = {
+                type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                    ? image->sampler_
+                    : VK_NULL_HANDLE,
+                image->view_,
+                type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                    ? VK_IMAGE_LAYOUT_GENERAL
+                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+            writes[index] = {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                descriptor_set,
+                static_cast<std::uint32_t>(index),
+                0,
+                1,
+                type,
+                &image_info[index],
+                nullptr,
+                nullptr,
+            };
+            continue;
+        }
+        const VulkanBuffer* buffer = resources[index].buffer;
+        if (buffer == nullptr || buffer->owner_ != this) {
             pipeline.cached_descriptor_sets_.push_back(descriptor_set);
             throw std::invalid_argument("foreign Vulkan buffer");
         }
         buffer_info[index] = {
-            buffers[index]->buffer_,
+            buffer->buffer_,
             0,
-            buffers[index]->size_,
+            buffer->size_,
         };
         writes[index] = {
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1181,7 +1613,7 @@ void VulkanContext::dispatch(
             static_cast<std::uint32_t>(index),
             0,
             1,
-            pipeline.descriptor_types_[index],
+            type,
             nullptr,
             &buffer_info[index],
             nullptr,
@@ -1286,6 +1718,29 @@ void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
     buffer.mapped_ = nullptr;
     buffer.size_ = 0;
     buffer.cacheable_ = false;
+}
+
+void VulkanContext::destroy(VulkanImage& image) noexcept {
+    if (image.sampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_, image.sampler_, nullptr);
+    }
+    if (image.view_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, image.view_, nullptr);
+    }
+    if (image.image_ != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, image.image_, nullptr);
+    }
+    if (image.memory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, image.memory_, nullptr);
+    }
+    image.owner_ = nullptr;
+    image.image_ = VK_NULL_HANDLE;
+    image.memory_ = VK_NULL_HANDLE;
+    image.view_ = VK_NULL_HANDLE;
+    image.sampler_ = VK_NULL_HANDLE;
+    image.format_ = VK_FORMAT_UNDEFINED;
+    image.width_ = 0;
+    image.height_ = 0;
 }
 
 void VulkanContext::destroy(VulkanSubmission& submission) noexcept {

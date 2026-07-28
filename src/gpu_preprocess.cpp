@@ -1,6 +1,7 @@
 #include "gpu_preprocess.h"
 
 #include "preprocess_rgba_spv.h"
+#include "preprocess_texture_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -13,7 +14,15 @@ GpuPreprocessor::GpuPreprocessor(VulkanContext& context)
           dav2_preprocess_rgba_spv,
           dav2_preprocess_rgba_spv_size,
           2,
-          6 * sizeof(std::uint32_t))) {}
+          6 * sizeof(std::uint32_t))),
+      texture_pipeline_(context.create_pipeline(
+          dav2_preprocess_texture_spv,
+          dav2_preprocess_texture_spv_size,
+          {
+              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          },
+          4 * sizeof(std::uint32_t))) {}
 
 void GpuPreprocessor::run(
     VulkanBuffer& destination,
@@ -77,6 +86,44 @@ void GpuPreprocessor::run(
         (destination_height + 7) / 8,
         1,
         wait);
+}
+
+void GpuPreprocessor::run_texture(
+    VulkanBuffer& destination,
+    const VulkanImage& source,
+    std::uint32_t destination_width,
+    std::uint32_t destination_height) {
+    if (source.width() == 0 || source.height() == 0 ||
+        destination_width == 0 || destination_height == 0) {
+        throw std::invalid_argument(
+            "invalid GPU texture preprocessing dimensions");
+    }
+    const std::uint64_t destination_bytes =
+        static_cast<std::uint64_t>(destination_width) *
+        destination_height * 3 * sizeof(float);
+    if (destination_bytes > destination.size()) {
+        throw std::invalid_argument(
+            "GPU texture preprocessing buffer is too small");
+    }
+    struct Parameters {
+        std::uint32_t source_width;
+        std::uint32_t source_height;
+        std::uint32_t destination_width;
+        std::uint32_t destination_height;
+    } parameters{
+        source.width(),
+        source.height(),
+        destination_width,
+        destination_height,
+    };
+    context_.dispatch_image_to_buffer(
+        texture_pipeline_,
+        source,
+        destination,
+        &parameters,
+        sizeof(parameters),
+        (destination_width + 7) / 8,
+        (destination_height + 7) / 8);
 }
 
 }  // namespace dav2

@@ -259,6 +259,198 @@ SharedInput upload_capture(
     return result;
 }
 
+struct SharedTextureInput {
+    ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Resource> upload;
+    ComPtr<ID3D12Fence> ready;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> commands;
+    HANDLE resource_handle = nullptr;
+    HANDLE fence_handle = nullptr;
+    std::uint64_t fence_value = 1;
+
+    SharedTextureInput() = default;
+    SharedTextureInput(const SharedTextureInput&) = delete;
+    SharedTextureInput& operator=(const SharedTextureInput&) = delete;
+    SharedTextureInput(SharedTextureInput&& other) noexcept
+        : resource(std::move(other.resource)),
+          upload(std::move(other.upload)),
+          ready(std::move(other.ready)),
+          allocator(std::move(other.allocator)),
+          commands(std::move(other.commands)),
+          resource_handle(
+              std::exchange(other.resource_handle, nullptr)),
+          fence_handle(
+              std::exchange(other.fence_handle, nullptr)),
+          fence_value(other.fence_value) {}
+
+    ~SharedTextureInput() {
+        if (resource_handle != nullptr) CloseHandle(resource_handle);
+        if (fence_handle != nullptr) CloseHandle(fence_handle);
+    }
+};
+
+SharedTextureInput upload_capture_texture(
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    const std::vector<std::uint8_t>& pixels,
+    std::uint32_t width,
+    std::uint32_t height,
+    DXGI_FORMAT format) {
+    const D3D12_HEAP_PROPERTIES default_heap{
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1,
+    };
+    const D3D12_RESOURCE_DESC texture_description{
+        D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        0,
+        width,
+        height,
+        1,
+        1,
+        format,
+        {1, 0},
+        D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+    };
+    SharedTextureInput result;
+    check(
+        device->CreateCommittedResource(
+            &default_heap,
+            D3D12_HEAP_FLAG_SHARED,
+            &texture_description,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&result.resource)),
+        "CreateCommittedResource(capture texture)");
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows = 0;
+    UINT64 row_bytes = 0;
+    UINT64 upload_bytes = 0;
+    device->GetCopyableFootprints(
+        &texture_description,
+        0,
+        1,
+        0,
+        &footprint,
+        &rows,
+        &row_bytes,
+        &upload_bytes);
+    const D3D12_HEAP_PROPERTIES upload_heap{
+        D3D12_HEAP_TYPE_UPLOAD,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1,
+    };
+    const D3D12_RESOURCE_DESC upload_description{
+        D3D12_RESOURCE_DIMENSION_BUFFER,
+        0,
+        upload_bytes,
+        1,
+        1,
+        1,
+        DXGI_FORMAT_UNKNOWN,
+        {1, 0},
+        D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        D3D12_RESOURCE_FLAG_NONE,
+    };
+    check(
+        device->CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &upload_description,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&result.upload)),
+        "CreateCommittedResource(texture upload)");
+    void* mapped = nullptr;
+    check(
+        result.upload->Map(0, nullptr, &mapped),
+        "Map(texture upload)");
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::memcpy(
+            static_cast<std::uint8_t*>(mapped) +
+                footprint.Offset +
+                static_cast<std::size_t>(y) *
+                    footprint.Footprint.RowPitch,
+            pixels.data() +
+                static_cast<std::size_t>(y) * width * 4,
+            static_cast<std::size_t>(width) * 4);
+    }
+    result.upload->Unmap(0, nullptr);
+    check(
+        device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&result.allocator)),
+        "CreateCommandAllocator(texture upload)");
+    check(
+        device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            result.allocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&result.commands)),
+        "CreateCommandList(texture upload)");
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = result.resource.Get();
+    destination.Type =
+        D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = result.upload.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source.PlacedFootprint = footprint;
+    result.commands->CopyTextureRegion(
+        &destination, 0, 0, 0, &source, nullptr);
+    const D3D12_RESOURCE_BARRIER barrier{
+        D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        {
+            {
+                result.resource.Get(),
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_COMMON,
+            },
+        },
+    };
+    result.commands->ResourceBarrier(1, &barrier);
+    check(result.commands->Close(), "Close(texture upload)");
+    ID3D12CommandList* submitted[] = {result.commands.Get()};
+    queue->ExecuteCommandLists(1, submitted);
+    check(
+        device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(&result.ready)),
+        "CreateFence(capture texture)");
+    check(
+        device->CreateSharedHandle(
+            result.resource.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.resource_handle),
+        "CreateSharedHandle(capture texture)");
+    check(
+        device->CreateSharedHandle(
+            result.ready.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.fence_handle),
+        "CreateSharedHandle(capture texture fence)");
+    check(
+        queue->Signal(result.ready.Get(), result.fence_value),
+        "Signal(capture texture)");
+    return result;
+}
+
 std::vector<std::uint8_t> make_pixels(
     std::uint32_t width,
     std::uint32_t height,
@@ -384,6 +576,155 @@ std::vector<float> read_depth(
     return result;
 }
 
+std::vector<float> read_depth_texture(
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    const dav2_d3d12_texture_output_descriptor& descriptor) {
+    ComPtr<ID3D12Resource> output;
+    ComPtr<ID3D12Fence> ready;
+    check(
+        device->OpenSharedHandle(
+            reinterpret_cast<HANDLE>(
+                static_cast<std::uintptr_t>(
+                    descriptor.shared_texture_handle)),
+            IID_PPV_ARGS(&output)),
+        "OpenSharedHandle(depth texture)");
+    check(
+        device->OpenSharedHandle(
+            reinterpret_cast<HANDLE>(
+                static_cast<std::uintptr_t>(
+                    descriptor.ready_fence_handle)),
+            IID_PPV_ARGS(&ready)),
+        "OpenSharedHandle(depth texture fence)");
+    const D3D12_RESOURCE_DESC output_description =
+        output->GetDesc();
+    if (output_description.Dimension !=
+            D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        output_description.Format != DXGI_FORMAT_R32_FLOAT ||
+        output_description.Width != descriptor.width ||
+        output_description.Height != descriptor.height) {
+        throw std::runtime_error(
+            "leased depth texture has the wrong D3D12 descriptor");
+    }
+    check(
+        queue->Wait(ready.Get(), descriptor.ready_fence_value),
+        "Wait(depth texture fence)");
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows = 0;
+    UINT64 row_bytes = 0;
+    UINT64 readback_bytes = 0;
+    device->GetCopyableFootprints(
+        &output_description,
+        0,
+        1,
+        0,
+        &footprint,
+        &rows,
+        &row_bytes,
+        &readback_bytes);
+    const D3D12_HEAP_PROPERTIES readback_heap{
+        D3D12_HEAP_TYPE_READBACK,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1,
+    };
+    const D3D12_RESOURCE_DESC readback_description{
+        D3D12_RESOURCE_DIMENSION_BUFFER,
+        0,
+        readback_bytes,
+        1,
+        1,
+        1,
+        DXGI_FORMAT_UNKNOWN,
+        {1, 0},
+        D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        D3D12_RESOURCE_FLAG_NONE,
+    };
+    ComPtr<ID3D12Resource> readback;
+    check(
+        device->CreateCommittedResource(
+            &readback_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &readback_description,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&readback)),
+        "CreateCommittedResource(texture readback)");
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> commands;
+    check(
+        device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&allocator)),
+        "CreateCommandAllocator(texture readback)");
+    check(
+        device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            allocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&commands)),
+        "CreateCommandList(texture readback)");
+    const D3D12_RESOURCE_BARRIER barrier{
+        D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        {
+            {
+                output.Get(),
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            },
+        },
+    };
+    commands->ResourceBarrier(1, &barrier);
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = readback.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = output.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0;
+    commands->CopyTextureRegion(
+        &destination, 0, 0, 0, &source, nullptr);
+    check(commands->Close(), "Close(texture readback)");
+    ID3D12CommandList* submitted[] = {commands.Get()};
+    queue->ExecuteCommandLists(1, submitted);
+    ComPtr<ID3D12Fence> complete;
+    check(
+        device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(&complete)),
+        "CreateFence(texture readback)");
+    check(
+        queue->Signal(complete.Get(), 1),
+        "Signal(texture readback)");
+    cpu_wait(complete.Get(), 1);
+    std::vector<float> result(
+        static_cast<std::size_t>(descriptor.width) *
+        descriptor.height);
+    void* mapped = nullptr;
+    check(
+        readback->Map(0, nullptr, &mapped),
+        "Map(texture readback)");
+    for (std::uint32_t y = 0; y < descriptor.height; ++y) {
+        std::memcpy(
+            result.data() +
+                static_cast<std::size_t>(y) * descriptor.width,
+            static_cast<const std::uint8_t*>(mapped) +
+                footprint.Offset +
+                static_cast<std::size_t>(y) *
+                    footprint.Footprint.RowPitch,
+            static_cast<std::size_t>(descriptor.width) *
+                sizeof(float));
+    }
+    readback->Unmap(0, nullptr);
+    return result;
+}
+
 void wait_depth_ready(
     ID3D12Device* device,
     const dav2_d3d12_output_descriptor& descriptor) {
@@ -395,6 +736,20 @@ void wait_depth_ready(
                     descriptor.ready_fence_handle)),
             IID_PPV_ARGS(&ready)),
         "OpenSharedHandle(depth fence)");
+    cpu_wait(ready.Get(), descriptor.ready_fence_value);
+}
+
+void wait_depth_texture_ready(
+    ID3D12Device* device,
+    const dav2_d3d12_texture_output_descriptor& descriptor) {
+    ComPtr<ID3D12Fence> ready;
+    check(
+        device->OpenSharedHandle(
+            reinterpret_cast<HANDLE>(
+                static_cast<std::uintptr_t>(
+                    descriptor.ready_fence_handle)),
+            IID_PPV_ARGS(&ready)),
+        "OpenSharedHandle(depth texture fence)");
     cpu_wait(ready.Get(), descriptor.ready_fence_value);
 }
 
@@ -504,7 +859,9 @@ int main() try {
         DAV2_GPU_CAP_ASYNC_SUBMIT |
         DAV2_GPU_CAP_CANCELLATION |
         DAV2_GPU_CAP_NO_HOST_PIXEL_STAGING |
-        DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING;
+        DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING |
+        DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_INPUT |
+        DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT;
     if ((capabilities.flags & required_capabilities) !=
             required_capabilities ||
         capabilities.adapter_luid == 0) {
@@ -619,6 +976,125 @@ int main() try {
                 context, pixels, width, height, depth);
         }
         std::cout << "frame " << request.source_frame_id
+                  << " GPU-resident graph passed\n";
+    }
+
+    for (std::uint32_t frame = 0; frame < 3; ++frame) {
+        const std::vector<std::uint8_t> pixels_bgra =
+            make_pixels(width, height, frame + 20);
+        std::vector<std::uint8_t> texture_pixels = pixels_bgra;
+        const bool rgba = frame == 1;
+        if (rgba) {
+            for (std::size_t index = 0;
+                 index < texture_pixels.size() / 4;
+                 ++index) {
+                std::swap(
+                    texture_pixels[index * 4],
+                    texture_pixels[index * 4 + 2]);
+            }
+        }
+        SharedTextureInput input = upload_capture_texture(
+            device.Get(),
+            queue.Get(),
+            texture_pixels,
+            width,
+            height,
+            rgba
+                ? DXGI_FORMAT_R8G8B8A8_UNORM
+                : DXGI_FORMAT_B8G8R8A8_UNORM);
+        dav2_transfer_counters before{};
+        before.struct_size = sizeof(before);
+        check(
+            dav2_get_transfer_counters(context, &before),
+            "dav2_get_transfer_counters(texture before)");
+        dav2_d3d12_texture_submit_request request{};
+        request.struct_size = sizeof(request);
+        request.abi_version = DAV2_ABI_VERSION;
+        request.shared_texture_handle =
+            reinterpret_cast<std::uintptr_t>(input.resource_handle);
+        request.width = width;
+        request.height = height;
+        request.pixel_format =
+            rgba ? DAV2_GPU_PIXEL_RGBA8 : DAV2_GPU_PIXEL_BGRA8;
+        request.input_size = 140;
+        request.wait_fence_handle =
+            reinterpret_cast<std::uintptr_t>(input.fence_handle);
+        request.wait_fence_value = input.fence_value;
+        request.source_frame_id = 10000 + frame;
+        request.timestamp_ns = 223456789 + frame;
+        dav2_gpu_job* job = nullptr;
+        check(
+            dav2_submit_d3d12_texture(
+                context, &request, &job),
+            "dav2_submit_d3d12_texture");
+        CloseHandle(input.resource_handle);
+        input.resource_handle = nullptr;
+        CloseHandle(input.fence_handle);
+        input.fence_handle = nullptr;
+        input.resource.Reset();
+        input.ready.Reset();
+
+        dav2_d3d12_texture_output_descriptor descriptor{};
+        descriptor.struct_size = sizeof(descriptor);
+        dav2_gpu_output_lease* lease = nullptr;
+        check(
+            dav2_gpu_texture_output_acquire(
+                job, 0, &descriptor, &lease),
+            "dav2_gpu_texture_output_acquire");
+        if (descriptor.source_frame_id != request.source_frame_id ||
+            descriptor.timestamp_ns != request.timestamp_ns ||
+            descriptor.width != width ||
+            descriptor.height != height ||
+            descriptor.pixel_format !=
+                DAV2_GPU_PIXEL_DEPTH_FLOAT32) {
+            throw std::runtime_error(
+                "GPU texture output metadata correlation failed");
+        }
+        wait_depth_texture_ready(device.Get(), descriptor);
+        dav2_gpu_job_status status{};
+        for (std::uint32_t attempt = 0; attempt < 1000; ++attempt) {
+            status = {};
+            status.struct_size = sizeof(status);
+            check(
+                dav2_gpu_job_poll(job, &status),
+                "dav2_gpu_job_poll(texture)");
+            if (status.state != DAV2_GPU_JOB_RUNNING) break;
+            Sleep(1);
+        }
+        if (status.state != DAV2_GPU_JOB_COMPLETE ||
+            status.source_frame_id != request.source_frame_id) {
+            throw std::runtime_error(
+                "GPU texture completion correlation failed");
+        }
+        dav2_gpu_job_release(job);
+        const std::vector<float> depth = read_depth_texture(
+            device.Get(), queue.Get(), descriptor);
+        validate_depth(depth);
+        dav2_gpu_output_release(lease);
+
+        dav2_transfer_counters after{};
+        after.struct_size = sizeof(after);
+        check(
+            dav2_get_transfer_counters(context, &after),
+            "dav2_get_transfer_counters(texture after)");
+        if (after.tensor_upload_bytes !=
+                before.tensor_upload_bytes ||
+            after.tensor_download_bytes !=
+                before.tensor_download_bytes) {
+            throw std::runtime_error(
+                "DAV2 staged texture pixels or depth through the CPU");
+        }
+        if (frame == 0 || rgba) {
+            compare_reference(
+                context,
+                pixels_bgra,
+                width,
+                height,
+                depth);
+        }
+        std::cout << "texture frame "
+                  << request.source_frame_id
+                  << (rgba ? " RGBA" : " BGRA")
                   << " GPU-resident graph passed\n";
     }
 

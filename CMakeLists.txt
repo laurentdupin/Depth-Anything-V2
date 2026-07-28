@@ -79,8 +79,10 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(conv_transpose_nonoverlap)
     dav2_compile_shader(conv_transpose_nonoverlap_half)
     dav2_compile_shader(bilinear_align_true)
+    dav2_compile_shader(bilinear_align_true_image)
     dav2_compile_shader(relu)
     dav2_compile_shader(preprocess_rgba)
+    dav2_compile_shader(preprocess_texture)
 endif()
 
 add_library(depth_anything_v2 SHARED

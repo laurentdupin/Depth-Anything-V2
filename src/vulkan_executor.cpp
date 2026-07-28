@@ -159,6 +159,93 @@ SharedD3D12Output create_shared_output(
     return result;
 }
 
+SharedD3D12Output create_shared_texture_output(
+    ID3D12Device* device,
+    std::uint32_t width,
+    std::uint32_t height) {
+    const D3D12_HEAP_PROPERTIES heap{
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1,
+    };
+    const D3D12_RESOURCE_DESC description{
+        D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        0,
+        width,
+        height,
+        1,
+        1,
+        DXGI_FORMAT_R32_FLOAT,
+        {1, 0},
+        D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+    SharedD3D12Output result;
+    check_hresult(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_SHARED,
+            &description,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(&result.resource)),
+        "CreateCommittedResource(DAV2 texture output)");
+    check_hresult(
+        device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(&result.fence)),
+        "CreateFence(DAV2 texture output)");
+    check_hresult(
+        device->CreateSharedHandle(
+            result.resource.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.resource_handle),
+        "CreateSharedHandle(DAV2 texture output)");
+    check_hresult(
+        device->CreateSharedHandle(
+            result.fence.Get(),
+            nullptr,
+            GENERIC_ALL,
+            nullptr,
+            &result.fence_handle),
+        "CreateSharedHandle(DAV2 texture output fence)");
+    return result;
+}
+
+void validate_shared_texture(
+    ID3D12Device* device,
+    std::uintptr_t handle,
+    std::uint32_t width,
+    std::uint32_t height,
+    dav2_gpu_pixel_format format) {
+    ComPtr<ID3D12Resource> resource;
+    check_hresult(
+        device->OpenSharedHandle(
+            reinterpret_cast<HANDLE>(handle),
+            IID_PPV_ARGS(&resource)),
+        "OpenSharedHandle(DAV2 texture input)");
+    const D3D12_RESOURCE_DESC description = resource->GetDesc();
+    const DXGI_FORMAT expected =
+        format == DAV2_GPU_PIXEL_BGRA8
+        ? DXGI_FORMAT_B8G8R8A8_UNORM
+        : DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.Width != width ||
+        description.Height != height ||
+        description.DepthOrArraySize != 1 ||
+        description.MipLevels != 1 ||
+        description.SampleDesc.Count != 1 ||
+        description.Format != expected) {
+        throw std::invalid_argument(
+            "shared D3D12 texture does not match its descriptor");
+    }
+}
+
 GpuCapabilities d3d12_capabilities(
     const VulkanContext& context,
     ID3D12Device* device) {
@@ -179,6 +266,13 @@ GpuCapabilities d3d12_capabilities(
             DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING;
         result.adapter_luid = context.adapter_luid();
         result.maximum_in_flight_jobs = 1;
+        if (external.d3d12_bgra8_sampled_image_import &&
+            external.d3d12_rgba8_sampled_image_import &&
+            external.d3d12_r32_storage_image_import) {
+            result.flags |=
+                DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_INPUT |
+                DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT;
+        }
     }
     return result;
 }
@@ -188,7 +282,10 @@ public:
     VulkanGpuJob(
         std::shared_ptr<GpuSlot> slot,
         SharedD3D12Output shared,
-        VulkanBuffer output,
+        GpuOutputKind kind,
+        VulkanBuffer output_buffer,
+        VulkanImage input_image,
+        VulkanImage output_image,
         VulkanSubmission submission,
         std::uint32_t width,
         std::uint32_t height,
@@ -196,7 +293,10 @@ public:
         std::uint64_t timestamp_ns)
         : slot_(std::move(slot)),
           shared_(std::move(shared)),
-          output_(std::move(output)),
+          kind_(kind),
+          output_buffer_(std::move(output_buffer)),
+          input_image_(std::move(input_image)),
+          output_image_(std::move(output_image)),
           submission_(std::move(submission)),
           width_(width),
           height_(height),
@@ -229,6 +329,7 @@ public:
             throw std::runtime_error("GPU job was cancelled");
         }
         GpuOutput result;
+        result.kind = kind_;
         result.width = width_;
         result.height = height_;
         result.row_stride_bytes = width_ * sizeof(float);
@@ -248,10 +349,13 @@ public:
 
 private:
     std::shared_ptr<GpuSlot> slot_;
-    // D3D12 ownership outlives the imported Vulkan buffer. Destruction is in
-    // reverse order: submission wait, Vulkan import, then D3D12 objects.
+    // D3D12 ownership outlives every Vulkan import. Destruction is in reverse
+    // order: submission wait, Vulkan imports, then shared D3D12 objects.
     SharedD3D12Output shared_;
-    VulkanBuffer output_;
+    GpuOutputKind kind_ = GpuOutputKind::buffer;
+    VulkanBuffer output_buffer_;
+    VulkanImage input_image_;
+    VulkanImage output_image_;
     VulkanSubmission submission_;
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
@@ -445,6 +549,149 @@ public:
             return std::make_unique<VulkanGpuJob>(
                 gpu_slot_,
                 std::move(shared),
+                GpuOutputKind::buffer,
+                std::move(output),
+                VulkanImage{},
+                VulkanImage{},
+                std::move(submission),
+                request.width,
+                request.height,
+                request.source_frame_id,
+                request.timestamp_ns);
+        } catch (...) {
+            gpu_slot_->occupied.store(
+                false, std::memory_order_release);
+            throw;
+        }
+#endif
+    }
+
+    std::unique_ptr<GpuJob> submit_gpu_texture(
+        const GpuTextureSubmitRequest& request) override {
+#if !defined(_WIN32)
+        (void)request;
+        throw std::runtime_error(
+            "D3D12 GPU texture submission is only available on Windows");
+#else
+        const GpuCapabilities capabilities = gpu_capabilities();
+        const std::uint64_t required =
+            DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_INPUT |
+            DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT;
+        if ((capabilities.flags & required) != required) {
+            throw std::runtime_error(
+                "complete D3D12/Vulkan texture interop is unavailable");
+        }
+        if (request.width == 0 || request.height == 0 ||
+            request.shared_texture_handle == 0 ||
+            request.wait_fence_handle == 0 ||
+            (request.pixel_format != DAV2_GPU_PIXEL_BGRA8 &&
+             request.pixel_format != DAV2_GPU_PIXEL_RGBA8) ||
+            request.width >
+                static_cast<std::uint32_t>(
+                    std::numeric_limits<std::int32_t>::max()) ||
+            request.height >
+                static_cast<std::uint32_t>(
+                    std::numeric_limits<std::int32_t>::max())) {
+            throw std::invalid_argument(
+                "invalid D3D12 GPU texture inference request");
+        }
+        validate_shared_texture(
+            d3d12_device_.Get(),
+            request.shared_texture_handle,
+            request.width,
+            request.height,
+            request.pixel_format);
+        bool expected = false;
+        if (!gpu_slot_->occupied.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            throw std::runtime_error(
+                "DAV2 supports one live GPU job per context");
+        }
+        try {
+            const ImageShape shape = network_shape(
+                static_cast<int>(request.width),
+                static_cast<int>(request.height),
+                request.input_size);
+            SharedD3D12Output shared =
+                create_shared_texture_output(
+                    d3d12_device_.Get(),
+                    request.width,
+                    request.height);
+            const VkFormat input_format =
+                request.pixel_format == DAV2_GPU_PIXEL_BGRA8
+                ? VK_FORMAT_B8G8R8A8_UNORM
+                : VK_FORMAT_R8G8B8A8_UNORM;
+            VulkanImage input = context_.import_d3d12_image(
+                reinterpret_cast<void*>(
+                    request.shared_texture_handle),
+                request.width,
+                request.height,
+                input_format,
+                VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            VulkanImage output = context_.import_d3d12_image(
+                shared.resource_handle,
+                request.width,
+                request.height,
+                VK_FORMAT_R32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+            VulkanSemaphore wait = context_.import_d3d12_fence(
+                reinterpret_cast<void*>(
+                    request.wait_fence_handle),
+                request.wait_fence_value);
+            VulkanSemaphore signal = context_.import_d3d12_fence(
+                shared.fence_handle, 1);
+            VulkanSubmission submission = context_.batch_async(
+                std::move(wait),
+                std::move(signal),
+                [&] {
+                    VulkanBuffer image =
+                        context_.create_device_buffer(
+                            static_cast<std::uint64_t>(
+                                shape.width) *
+                            shape.height * 3u * sizeof(float));
+                    context_.acquire_external_image(
+                        input,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT);
+                    context_.acquire_external_image(
+                        output,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        VK_ACCESS_SHADER_WRITE_BIT);
+                    preprocessor_.run_texture(
+                        image,
+                        input,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height));
+                    EncoderOutput encoded = encoder_.forward(
+                        image,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height));
+                    FeatureMap depth =
+                        dpt_.forward(std::move(encoded));
+                    operators_.bilinear_align_true_image(
+                        output,
+                        depth.buffer,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height),
+                        request.width,
+                        request.height);
+                    context_.release_external_image(
+                        input,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT);
+                    context_.release_external_image(
+                        output,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        VK_ACCESS_SHADER_WRITE_BIT);
+                });
+            return std::make_unique<VulkanGpuJob>(
+                gpu_slot_,
+                std::move(shared),
+                GpuOutputKind::texture,
+                VulkanBuffer{},
+                std::move(input),
                 std::move(output),
                 std::move(submission),
                 request.width,

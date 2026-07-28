@@ -145,7 +145,12 @@ available, the public additive GPU ABI can:
   write row-major float32 depth, and signal the explicit fence value without
   queue-idle waits or host readback;
 - perform explicit external-to-compute and compute-to-external Vulkan queue
-  family ownership transfers for both shared buffers.
+  family ownership transfers for both shared buffers;
+- directly import shared D3D12 `TEXTURE2D` capture resources in
+  `B8G8R8A8_UNORM` or `R8G8B8A8_UNORM` as sampled Vulkan images;
+- run bicubic normalization from the sampled image and write the final
+  source-size depth directly to an imported shared D3D12
+  `DXGI_FORMAT_R32_FLOAT` texture with a storage-image shader.
 
 The AMD RX 9070 driver supports D3D12-to-Vulkan resource and fence import but
 does not expose the inverse Vulkan export capabilities. DAV2 therefore creates
@@ -154,14 +159,17 @@ still a single physical GPU allocation and does not stage pixels or depth
 through host memory.
 
 `dav2_submit_d3d12` duplicates/imports the caller's borrowed resource and fence
-handles before returning. Jobs retain every descriptor set, intermediate
-buffer, imported semaphore, command buffer, and completion fence until the
-submission completes. An acquired output descriptor contains borrowed shared
-D3D12 buffer/fence handles which remain valid through the explicit output
-lease. Releasing a job handle does not invalidate a live lease. Cancellation
-does not attempt unsafe command-buffer preemption: it makes the output
-unavailable and retained resources are reclaimed after the submitted fence
-completes. One live GPU job is currently allowed per context.
+handles before returning. `dav2_submit_d3d12_texture` provides the equivalent
+direct image path and validates the opened D3D12 texture's dimensions, format,
+array size, mip count, and sample count before importing it. Jobs retain every
+descriptor set, intermediate buffer, image view, sampler, imported semaphore,
+command buffer, and completion fence until the submission completes. Acquired
+buffer or texture output descriptors contain borrowed shared D3D12
+resource/fence handles which remain valid through the explicit output lease.
+Releasing a job handle does not invalidate a live lease. Cancellation does not
+attempt unsafe command-buffer preemption: it makes the output unavailable and
+retained resources are reclaimed after the submitted fence completes. One live
+GPU job is currently allowed per context.
 
 Capability flags are returned only when the complete input, graph, output, and
 synchronization path is available. `dav2_probe_gpu_capabilities` performs the
@@ -182,6 +190,9 @@ The exported surface is deliberately small:
 - asynchronously submit shared D3D12 BGRA8/RGBA8 buffers with a shared-fence
   wait, poll/cancel the correlated job, and acquire/release a shared D3D12
   float32 depth output lease;
+- asynchronously submit shared D3D12 BGRA8/RGBA8 textures and acquire a shared
+  D3D12 `R32_FLOAT` texture plus completion fence through the same job and
+  lease lifecycle;
 - obtain stable status strings and a thread-local detailed error.
 
 Every input dimension is checked before allocation or dispatch. Network tensor

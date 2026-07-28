@@ -34,5 +34,13 @@ int main(void) {
     assert(
         dav2_get_gpu_capabilities(NULL, &capabilities) ==
         DAV2_STATUS_INVALID_ARGUMENT);
+    dav2_d3d12_texture_submit_request texture_request = {0};
+    texture_request.struct_size = sizeof(texture_request);
+    texture_request.abi_version = DAV2_ABI_VERSION;
+    dav2_gpu_job* job = NULL;
+    assert(
+        dav2_submit_d3d12_texture(
+            NULL, &texture_request, &job) ==
+        DAV2_STATUS_INVALID_ARGUMENT);
     return 0;
 }

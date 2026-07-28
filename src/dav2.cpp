@@ -310,6 +310,57 @@ dav2_status DAV2_CALL dav2_submit_d3d12(
     });
 }
 
+dav2_status DAV2_CALL dav2_submit_d3d12_texture(
+    dav2_context* context,
+    const dav2_d3d12_texture_submit_request* request,
+    dav2_gpu_job** job) {
+    if (context == nullptr || request == nullptr || job == nullptr) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "null D3D12 texture submit argument");
+    }
+    *job = nullptr;
+    if (request->struct_size < sizeof(*request) ||
+        request->abi_version != DAV2_ABI_VERSION) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "invalid D3D12 texture submit request");
+    }
+    return protect([&] {
+        const std::uint64_t required =
+            DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_INPUT |
+            DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT;
+        if ((context->executor->gpu_capabilities().flags &
+             required) != required) {
+            throw ApiError(
+                DAV2_STATUS_UNSUPPORTED,
+                "complete D3D12/Vulkan texture interop is unavailable");
+        }
+        dav2::GpuTextureSubmitRequest native;
+        native.shared_texture_handle =
+            static_cast<std::uintptr_t>(
+                request->shared_texture_handle);
+        native.width = request->width;
+        native.height = request->height;
+        native.pixel_format =
+            static_cast<dav2_gpu_pixel_format>(
+                request->pixel_format);
+        native.input_size = request->input_size;
+        native.wait_fence_handle =
+            static_cast<std::uintptr_t>(
+                request->wait_fence_handle);
+        native.wait_fence_value = request->wait_fence_value;
+        native.source_frame_id = request->source_frame_id;
+        native.timestamp_ns = request->timestamp_ns;
+        auto result = std::make_unique<dav2_gpu_job>();
+        result->executor = context->executor;
+        result->source_frame_id = request->source_frame_id;
+        result->implementation =
+            context->executor->submit_gpu_texture(native);
+        *job = result.release();
+    });
+}
+
 dav2_status DAV2_CALL dav2_gpu_job_poll(
     const dav2_gpu_job* job,
     dav2_gpu_job_status* status) {
@@ -386,6 +437,11 @@ dav2_status DAV2_CALL dav2_gpu_output_acquire(
         }
         const dav2::GpuOutput output =
             job->implementation->output();
+        if (output.kind != dav2::GpuOutputKind::buffer) {
+            throw ApiError(
+                DAV2_STATUS_UNSUPPORTED,
+                "GPU job output is a D3D12 texture");
+        }
         auto result =
             std::make_unique<dav2_gpu_output_lease>();
         retain_gpu_job(job);
@@ -401,6 +457,65 @@ dav2_status DAV2_CALL dav2_gpu_output_acquire(
             output.row_stride_bytes;
         descriptor->byte_size = output.byte_size;
         descriptor->shared_resource_handle =
+            output.shared_resource_handle;
+        descriptor->ready_fence_handle =
+            output.ready_fence_handle;
+        descriptor->ready_fence_value =
+            output.ready_fence_value;
+        descriptor->source_frame_id =
+            output.source_frame_id;
+        descriptor->timestamp_ns = output.timestamp_ns;
+        *lease = result.release();
+    });
+}
+
+dav2_status DAV2_CALL dav2_gpu_texture_output_acquire(
+    dav2_gpu_job* job,
+    uint32_t output_index,
+    dav2_d3d12_texture_output_descriptor* descriptor,
+    dav2_gpu_output_lease** lease) {
+    if (job == nullptr || descriptor == nullptr || lease == nullptr) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "null GPU texture output acquire argument");
+    }
+    *lease = nullptr;
+    if (descriptor->struct_size < sizeof(*descriptor)) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "GPU texture output descriptor struct is too small");
+    }
+    if (output_index != 0) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "GPU texture output index does not exist");
+    }
+    return protect([&] {
+        if (job->implementation->state() ==
+            DAV2_GPU_JOB_CANCELLED) {
+            throw ApiError(
+                DAV2_STATUS_CANCELLED,
+                "cancelled GPU job has no texture output");
+        }
+        const dav2::GpuOutput output =
+            job->implementation->output();
+        if (output.kind != dav2::GpuOutputKind::texture) {
+            throw ApiError(
+                DAV2_STATUS_UNSUPPORTED,
+                "GPU job output is a D3D12 buffer");
+        }
+        auto result =
+            std::make_unique<dav2_gpu_output_lease>();
+        retain_gpu_job(job);
+        result->job = job;
+        *descriptor = {};
+        descriptor->struct_size = sizeof(*descriptor);
+        descriptor->abi_version = DAV2_ABI_VERSION;
+        descriptor->pixel_format =
+            DAV2_GPU_PIXEL_DEPTH_FLOAT32;
+        descriptor->width = output.width;
+        descriptor->height = output.height;
+        descriptor->shared_texture_handle =
             output.shared_resource_handle;
         descriptor->ready_fence_handle =
             output.ready_fence_handle;

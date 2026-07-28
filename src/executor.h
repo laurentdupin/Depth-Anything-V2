@@ -28,7 +28,25 @@ struct GpuSubmitRequest {
     std::uint64_t timestamp_ns = 0;
 };
 
+struct GpuTextureSubmitRequest {
+    std::uintptr_t shared_texture_handle = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    dav2_gpu_pixel_format pixel_format = DAV2_GPU_PIXEL_BGRA8;
+    std::int32_t input_size = 0;
+    std::uintptr_t wait_fence_handle = 0;
+    std::uint64_t wait_fence_value = 0;
+    std::uint64_t source_frame_id = 0;
+    std::uint64_t timestamp_ns = 0;
+};
+
+enum class GpuOutputKind {
+    buffer,
+    texture,
+};
+
 struct GpuOutput {
+    GpuOutputKind kind = GpuOutputKind::buffer;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t row_stride_bytes = 0;
@@ -66,6 +84,8 @@ public:
     virtual GpuCapabilities gpu_capabilities() const = 0;
     virtual std::unique_ptr<GpuJob> submit_gpu(
         const GpuSubmitRequest& request) = 0;
+    virtual std::unique_ptr<GpuJob> submit_gpu_texture(
+        const GpuTextureSubmitRequest& request) = 0;
     virtual void transfer_counters(
         std::uint64_t& upload_bytes,
         std::uint64_t& download_bytes) const = 0;

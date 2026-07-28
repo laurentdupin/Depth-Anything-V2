@@ -4,6 +4,7 @@
 #include "add_spv.h"
 #include "add_position_spv.h"
 #include "bilinear_align_true_spv.h"
+#include "bilinear_align_true_image_spv.h"
 #include "bmm_spv.h"
 #include "bmm_score_half_spv.h"
 #include "bmm_value_half_spv.h"
@@ -164,6 +165,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_bilinear_align_true_spv_size,
           2,
           20)),
+      bilinear_align_true_image_(context.create_pipeline(
+          dav2_bilinear_align_true_image_spv,
+          dav2_bilinear_align_true_image_spv_size,
+          {
+              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          },
+          16)),
       relu_(context.create_pipeline(
           dav2_relu_spv, dav2_relu_spv_size, 2, 4)) {}
 
@@ -728,6 +737,42 @@ void VulkanOperators::bilinear_align_true(
         divide_up(output_width, 8),
         divide_up(output_height, 8),
         channels);
+}
+
+void VulkanOperators::bilinear_align_true_image(
+    VulkanImage& output,
+    const VulkanBuffer& input,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t output_width,
+    std::uint32_t output_height) {
+    if (input_width == 0 || input_height == 0 ||
+        output_width == 0 || output_height == 0 ||
+        output.width() != output_width ||
+        output.height() != output_height ||
+        output.format() != VK_FORMAT_R32_SFLOAT) {
+        throw std::invalid_argument(
+            "invalid bilinear image dimensions or format");
+    }
+    require_bytes(
+        input,
+        std::uint64_t(input_width) * input_height,
+        "bilinear image input");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+    } parameters{
+        input_width, input_height, output_width, output_height};
+    context_.dispatch_buffer_to_image(
+        bilinear_align_true_image_,
+        input,
+        output,
+        &parameters,
+        sizeof(parameters),
+        divide_up(output_width, 8),
+        divide_up(output_height, 8));
 }
 
 void VulkanOperators::relu(

@@ -24,6 +24,8 @@ namespace dav2 {
 
 class VulkanContext;
 class VulkanPipeline;
+class VulkanBuffer;
+class VulkanImage;
 
 struct VulkanDeferredBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -38,9 +40,17 @@ struct VulkanBatchedDescriptor {
     VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
+struct VulkanDispatchResource {
+    const VulkanBuffer* buffer = nullptr;
+    const VulkanImage* image = nullptr;
+};
+
 struct VulkanExternalCapabilities {
     bool d3d12_resource_import = false;
     bool d3d12_fence_import = false;
+    bool d3d12_bgra8_sampled_image_import = false;
+    bool d3d12_rgba8_sampled_image_import = false;
+    bool d3d12_r32_storage_image_import = false;
 };
 
 class VulkanSemaphore {
@@ -102,6 +112,31 @@ private:
     bool cacheable_ = false;
 };
 
+class VulkanImage {
+public:
+    VulkanImage() = default;
+    VulkanImage(VulkanImage&& other) noexcept;
+    VulkanImage& operator=(VulkanImage&& other) noexcept;
+    VulkanImage(const VulkanImage&) = delete;
+    VulkanImage& operator=(const VulkanImage&) = delete;
+    ~VulkanImage();
+
+    std::uint32_t width() const { return width_; }
+    std::uint32_t height() const { return height_; }
+    VkFormat format() const { return format_; }
+
+private:
+    friend class VulkanContext;
+    VulkanContext* owner_ = nullptr;
+    VkImage image_ = VK_NULL_HANDLE;
+    VkDeviceMemory memory_ = VK_NULL_HANDLE;
+    VkImageView view_ = VK_NULL_HANDLE;
+    VkSampler sampler_ = VK_NULL_HANDLE;
+    VkFormat format_ = VK_FORMAT_UNDEFINED;
+    std::uint32_t width_ = 0;
+    std::uint32_t height_ = 0;
+};
+
 class VulkanPipeline {
 public:
     VulkanPipeline() = default;
@@ -143,6 +178,12 @@ public:
     VulkanSemaphore import_d3d12_fence(
         void* shared_handle,
         std::uint64_t value);
+    VulkanImage import_d3d12_image(
+        void* shared_handle,
+        std::uint32_t width,
+        std::uint32_t height,
+        VkFormat format,
+        VkImageUsageFlags usage);
 #endif
 
     VulkanBuffer create_device_buffer(VkDeviceSize bytes);
@@ -166,6 +207,14 @@ public:
     void release_external_buffer(
         const VulkanBuffer& buffer,
         VkAccessFlags source_access);
+    void acquire_external_image(
+        const VulkanImage& image,
+        VkImageLayout layout,
+        VkAccessFlags destination_access);
+    void release_external_image(
+        const VulkanImage& image,
+        VkImageLayout layout,
+        VkAccessFlags source_access);
 
     VulkanPipeline create_pipeline(
         const std::uint32_t* spirv,
@@ -187,6 +236,24 @@ public:
         std::uint32_t group_y = 1,
         std::uint32_t group_z = 1,
         const VulkanSemaphore* wait = nullptr);
+    void dispatch_image_to_buffer(
+        const VulkanPipeline& pipeline,
+        const VulkanImage& image,
+        VulkanBuffer& buffer,
+        const void* push_constants,
+        std::uint32_t push_constant_bytes,
+        std::uint32_t group_x,
+        std::uint32_t group_y = 1,
+        std::uint32_t group_z = 1);
+    void dispatch_buffer_to_image(
+        const VulkanPipeline& pipeline,
+        const VulkanBuffer& buffer,
+        VulkanImage& image,
+        const void* push_constants,
+        std::uint32_t push_constant_bytes,
+        std::uint32_t group_x,
+        std::uint32_t group_y = 1,
+        std::uint32_t group_z = 1);
 
     template <typename Function>
     void batch(Function&& function) {
@@ -228,6 +295,7 @@ private:
     friend class VulkanSemaphore;
     friend class VulkanSubmission;
     friend class VulkanBuffer;
+    friend class VulkanImage;
     friend class VulkanPipeline;
 
     std::uint32_t find_memory_type(
@@ -246,6 +314,15 @@ private:
         VkCommandBuffer command_buffer,
         const VulkanSemaphore* wait = nullptr,
         const VulkanSemaphore* signal = nullptr);
+    void dispatch_resources(
+        const VulkanPipeline& pipeline,
+        const std::vector<VulkanDispatchResource>& resources,
+        const void* push_constants,
+        std::uint32_t push_constant_bytes,
+        std::uint32_t group_x,
+        std::uint32_t group_y,
+        std::uint32_t group_z,
+        const VulkanSemaphore* wait);
     void end_commands(
         VkCommandBuffer command_buffer,
         const VulkanSemaphore* wait = nullptr);
@@ -260,6 +337,7 @@ private:
     void destroy(VulkanSemaphore& semaphore) noexcept;
     void destroy(VulkanSubmission& submission) noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
+    void destroy(VulkanImage& image) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
     void release_submission_resources(
         VulkanSubmission& submission) noexcept;

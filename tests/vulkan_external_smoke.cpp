@@ -321,6 +321,12 @@ int main() {
         << "D3D12 resource import="
         << capabilities.d3d12_resource_import
         << " fence import=" << capabilities.d3d12_fence_import
+        << " BGRA8 sampled image import="
+        << capabilities.d3d12_bgra8_sampled_image_import
+        << " RGBA8 sampled image import="
+        << capabilities.d3d12_rgba8_sampled_image_import
+        << " R32 storage image import="
+        << capabilities.d3d12_r32_storage_image_import
         << '\n';
     if (!capabilities.d3d12_resource_import ||
         !capabilities.d3d12_fence_import ||
