@@ -49,6 +49,7 @@ private:
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorType> descriptor_types_;
+    mutable std::vector<VkDescriptorSet> cached_descriptor_sets_;
     std::uint32_t push_constant_bytes_ = 0;
 };
 
@@ -148,9 +149,13 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         void* mapped = nullptr;
     };
+    struct BatchedDescriptor {
+        VulkanPipeline* pipeline = nullptr;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
-    std::vector<VkDescriptorSet> batch_descriptor_sets_;
+    std::vector<BatchedDescriptor> batch_descriptor_sets_;
     std::vector<DeferredBuffer> batch_deferred_buffers_;
     std::string device_name_;
 };

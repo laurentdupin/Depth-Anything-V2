@@ -57,6 +57,8 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
         layout_ = std::exchange(other.layout_, VK_NULL_HANDLE);
         pipeline_ = std::exchange(other.pipeline_, VK_NULL_HANDLE);
         descriptor_types_ = std::move(other.descriptor_types_);
+        cached_descriptor_sets_ =
+            std::move(other.cached_descriptor_sets_);
         push_constant_bytes_ = std::exchange(other.push_constant_bytes_, 0);
     }
     return *this;
@@ -349,14 +351,14 @@ void VulkanContext::begin_batch() {
 }
 
 void VulkanContext::release_batch_resources() noexcept {
-    if (!batch_descriptor_sets_.empty()) {
-        vkFreeDescriptorSets(
-            device_,
-            descriptor_pool_,
-            static_cast<std::uint32_t>(batch_descriptor_sets_.size()),
-            batch_descriptor_sets_.data());
-        batch_descriptor_sets_.clear();
+    for (const BatchedDescriptor& descriptor :
+         batch_descriptor_sets_) {
+        if (descriptor.pipeline && descriptor.set) {
+            descriptor.pipeline->cached_descriptor_sets_.push_back(
+                descriptor.set);
+        }
     }
+    batch_descriptor_sets_.clear();
     for (const DeferredBuffer& buffer : batch_deferred_buffers_) {
         if (buffer.mapped) {
             vkUnmapMemory(device_, buffer.memory);
@@ -560,24 +562,28 @@ void VulkanContext::dispatch(
         throw std::invalid_argument("invalid Vulkan dispatch");
     }
 
-    const VkDescriptorSetAllocateInfo allocate_info{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        nullptr,
-        descriptor_pool_,
-        1,
-        &pipeline.descriptor_layout_,
-    };
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-    check(
-        vkAllocateDescriptorSets(
-            device_, &allocate_info, &descriptor_set),
-        "vkAllocateDescriptorSets");
+    if (!pipeline.cached_descriptor_sets_.empty()) {
+        descriptor_set = pipeline.cached_descriptor_sets_.back();
+        pipeline.cached_descriptor_sets_.pop_back();
+    } else {
+        const VkDescriptorSetAllocateInfo allocate_info{
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            nullptr,
+            descriptor_pool_,
+            1,
+            &pipeline.descriptor_layout_,
+        };
+        check(
+            vkAllocateDescriptorSets(
+                device_, &allocate_info, &descriptor_set),
+            "vkAllocateDescriptorSets");
+    }
     std::vector<VkDescriptorBufferInfo> buffer_info(buffers.size());
     std::vector<VkWriteDescriptorSet> writes(buffers.size());
     for (std::size_t index = 0; index < buffers.size(); ++index) {
         if (buffers[index] == nullptr || buffers[index]->owner_ != this) {
-            vkFreeDescriptorSets(
-                device_, descriptor_pool_, 1, &descriptor_set);
+            pipeline.cached_descriptor_sets_.push_back(descriptor_set);
             throw std::invalid_argument("foreign Vulkan buffer");
         }
         buffer_info[index] = {
@@ -650,13 +656,11 @@ void VulkanContext::dispatch(
     vkCmdDispatch(command, group_x, group_y, group_z);
     if (batched) {
         batch_has_dispatch_ = true;
-        batch_descriptor_sets_.push_back(descriptor_set);
+        batch_descriptor_sets_.push_back(
+            {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
     } else {
         end_commands(command);
-        check(
-            vkFreeDescriptorSets(
-                device_, descriptor_pool_, 1, &descriptor_set),
-            "vkFreeDescriptorSets");
+        pipeline.cached_descriptor_sets_.push_back(descriptor_set);
     }
 }
 
@@ -690,6 +694,15 @@ void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
 }
 
 void VulkanContext::destroy(VulkanPipeline& pipeline) noexcept {
+    if (!pipeline.cached_descriptor_sets_.empty()) {
+        vkFreeDescriptorSets(
+            device_,
+            descriptor_pool_,
+            static_cast<std::uint32_t>(
+                pipeline.cached_descriptor_sets_.size()),
+            pipeline.cached_descriptor_sets_.data());
+        pipeline.cached_descriptor_sets_.clear();
+    }
     if (pipeline.pipeline_) {
         vkDestroyPipeline(device_, pipeline.pipeline_, nullptr);
     }
