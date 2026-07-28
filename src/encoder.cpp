@@ -75,71 +75,128 @@ void DinoEncoder::select_linear_tile() {
         std::uint64_t(rows) * embedding_ * 4 * sizeof(float);
     VulkanBuffer left = context_.create_device_buffer(work_bytes);
     VulkanBuffer right = context_.create_device_buffer(work_bytes);
-    const auto run = [&](bool block16) {
+    const auto selected_weight = [&](
+        const std::string& name,
+        bool half_weight) -> const VulkanBuffer& {
+        const GpuTensor& tensor = weights_.tensor(name);
+        return half_weight ? tensor.half_buffer : tensor.buffer;
+    };
+    const auto run = [&](bool block16, bool half_weight) {
         const auto start = std::chrono::steady_clock::now();
         context_.batch([&] {
             operators_.linear(
                 right,
                 left,
-                buffer(weights_, block_name(0, ".attn.qkv.weight")),
+                selected_weight(
+                    block_name(0, ".attn.qkv.weight"), half_weight),
                 buffer(weights_, block_name(0, ".attn.qkv.bias")),
                 rows,
                 embedding_,
                 embedding_ * 3,
                 false,
-                block16);
+                block16,
+                half_weight);
             operators_.linear(
                 left,
                 right,
-                buffer(weights_, block_name(0, ".attn.proj.weight")),
+                selected_weight(
+                    block_name(0, ".attn.proj.weight"), half_weight),
                 buffer(weights_, block_name(0, ".attn.proj.bias")),
                 rows,
                 embedding_,
                 embedding_,
                 false,
-                block16);
+                block16,
+                half_weight);
             operators_.linear(
                 right,
                 left,
-                buffer(weights_, block_name(0, ".mlp.fc1.weight")),
+                selected_weight(
+                    block_name(0, ".mlp.fc1.weight"), half_weight),
                 buffer(weights_, block_name(0, ".mlp.fc1.bias")),
                 rows,
                 embedding_,
                 embedding_ * 4,
                 true,
-                block16);
+                block16,
+                half_weight);
             operators_.linear(
                 left,
                 right,
-                buffer(weights_, block_name(0, ".mlp.fc2.weight")),
+                selected_weight(
+                    block_name(0, ".mlp.fc2.weight"), half_weight),
                 buffer(weights_, block_name(0, ".mlp.fc2.bias")),
                 rows,
                 embedding_ * 4,
                 embedding_,
                 false,
-                block16);
+                block16,
+                half_weight);
         });
         return std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - start).count();
     };
-    run(false);
-    run(true);
-    std::array<double, 5> tile8{};
-    std::array<double, 5> tile16{};
-    for (std::size_t index = 0; index < tile8.size(); ++index) {
-        if ((index & 1u) == 0) {
-            tile8[index] = run(false);
-            tile16[index] = run(true);
+    struct Candidate {
+        bool block16;
+        bool half_weight;
+        std::array<double, 3> samples{};
+    };
+    std::array<Candidate, 4> candidates{{
+        {false, false, {}},
+        {true, false, {}},
+        {false, true, {}},
+        {true, true, {}},
+    }};
+    for (Candidate& candidate : candidates) {
+        run(candidate.block16, candidate.half_weight);
+    }
+    for (std::size_t sample = 0;
+         sample < candidates[0].samples.size();
+         ++sample) {
+        if ((sample & 1u) == 0) {
+            for (Candidate& candidate : candidates) {
+                candidate.samples[sample] =
+                    run(candidate.block16, candidate.half_weight);
+            }
         } else {
-            tile16[index] = run(true);
-            tile8[index] = run(false);
+            for (auto candidate = candidates.rbegin();
+                 candidate != candidates.rend();
+                 ++candidate) {
+                candidate->samples[sample] =
+                    run(candidate->block16, candidate->half_weight);
+            }
         }
     }
-    std::sort(tile8.begin(), tile8.end());
-    std::sort(tile16.begin(), tile16.end());
-    linear_block16_ =
-        tile16[tile16.size() / 2] < tile8[tile8.size() / 2];
+    Candidate* best_fp32 = nullptr;
+    Candidate* best_half = nullptr;
+    double best_fp32_time = 0.0;
+    double best_half_time = 0.0;
+    for (Candidate& candidate : candidates) {
+        std::sort(candidate.samples.begin(), candidate.samples.end());
+        const double median =
+            candidate.samples[candidate.samples.size() / 2];
+        Candidate*& best =
+            candidate.half_weight ? best_half : best_fp32;
+        double& best_time =
+            candidate.half_weight ? best_half_time : best_fp32_time;
+        if (best == nullptr || median < best_time) {
+            best = &candidate;
+            best_time = median;
+        }
+    }
+    Candidate* best =
+        best_half_time < best_fp32_time * 0.96
+        ? best_half
+        : best_fp32;
+    linear_block16_ = best->block16;
+    linear_half_weight_ = best->half_weight;
     linear_tile_selected_ = true;
+}
+
+const VulkanBuffer& DinoEncoder::linear_weight(
+    const std::string& name) const {
+    const GpuTensor& tensor = weights_.tensor(name);
+    return linear_half_weight_ ? tensor.half_buffer : tensor.buffer;
 }
 
 EncoderOutput DinoEncoder::forward(
@@ -207,25 +264,27 @@ EncoderOutput DinoEncoder::forward(
             operators_.linear(
                 qkv,
                 normalized,
-                buffer(weights_, block_name(block, ".attn.qkv.weight")),
+                linear_weight(block_name(block, ".attn.qkv.weight")),
                 buffer(weights_, block_name(block, ".attn.qkv.bias")),
                 tokens,
                 embedding_,
                 embedding_ * 3,
                 false,
-                linear_block16_);
+                linear_block16_,
+                linear_half_weight_);
             operators_.attention_head64(
                 attention, qkv, tokens, heads_, &attention_scores);
             operators_.linear(
                 query,
                 attention,
-                buffer(weights_, block_name(block, ".attn.proj.weight")),
+                linear_weight(block_name(block, ".attn.proj.weight")),
                 buffer(weights_, block_name(block, ".attn.proj.bias")),
                 tokens,
                 embedding_,
                 embedding_,
                 false,
-                linear_block16_);
+                linear_block16_,
+                linear_half_weight_);
             operators_.add_scaled(
                 next,
                 current,
@@ -246,23 +305,25 @@ EncoderOutput DinoEncoder::forward(
             operators_.linear(
                 hidden,
                 normalized,
-                buffer(weights_, block_name(block, ".mlp.fc1.weight")),
+                linear_weight(block_name(block, ".mlp.fc1.weight")),
                 buffer(weights_, block_name(block, ".mlp.fc1.bias")),
                 tokens,
                 embedding_,
                 embedding_ * 4,
                 true,
-                linear_block16_);
+                linear_block16_,
+                linear_half_weight_);
             operators_.linear(
                 query,
                 hidden,
-                buffer(weights_, block_name(block, ".mlp.fc2.weight")),
+                linear_weight(block_name(block, ".mlp.fc2.weight")),
                 buffer(weights_, block_name(block, ".mlp.fc2.bias")),
                 tokens,
                 embedding_ * 4,
                 embedding_,
                 false,
-                linear_block16_);
+                linear_block16_,
+                linear_half_weight_);
             operators_.add_scaled(
                 next,
                 current,

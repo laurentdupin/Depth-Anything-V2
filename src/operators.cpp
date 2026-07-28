@@ -12,6 +12,8 @@
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
 #include "linear16_spv.h"
+#include "linear_half_spv.h"
+#include "linear16_half_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -40,6 +42,19 @@ void require_bytes(
     }
 }
 
+void require_half_elements(
+    const VulkanBuffer& buffer,
+    std::uint64_t elements,
+    const char* name) {
+    const std::uint64_t words = (elements + 1) / 2;
+    if (words > std::numeric_limits<std::uint64_t>::max() /
+            sizeof(std::uint32_t) ||
+        buffer.size() < words * sizeof(std::uint32_t)) {
+        throw std::invalid_argument(
+            std::string(name) + " packed-half Vulkan buffer is too small");
+    }
+}
+
 }  // namespace
 
 VulkanOperators::VulkanOperators(VulkanContext& context)
@@ -48,6 +63,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_linear_spv, dav2_linear_spv_size, 4, 12)),
       linear16_(context.create_pipeline(
           dav2_linear16_spv, dav2_linear16_spv_size, 4, 12)),
+      linear_half_(context.create_pipeline(
+          dav2_linear_half_spv, dav2_linear_half_spv_size, 4, 12)),
+      linear16_half_(context.create_pipeline(
+          dav2_linear16_half_spv,
+          dav2_linear16_half_spv_size,
+          4,
+          12)),
       gelu_(context.create_pipeline(
           dav2_gelu_spv, dav2_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
@@ -115,15 +137,19 @@ void VulkanOperators::linear(
     std::uint32_t input_columns,
     std::uint32_t output_columns,
     bool gelu,
-    bool block16) {
+    bool block16,
+    bool half_weight) {
     if (rows == 0 || input_columns == 0 || output_columns == 0) {
         throw std::invalid_argument("linear dimensions cannot be zero");
     }
     require_bytes(input, std::uint64_t(rows) * input_columns, "input");
-    require_bytes(
-        weight,
-        std::uint64_t(output_columns) * input_columns,
-        "weight");
+    const std::uint64_t weight_elements =
+        std::uint64_t(output_columns) * input_columns;
+    if (half_weight) {
+        require_half_elements(weight, weight_elements, "weight");
+    } else {
+        require_bytes(weight, weight_elements, "weight");
+    }
     require_bytes(bias, output_columns, "bias");
     require_bytes(
         output, std::uint64_t(rows) * output_columns, "output");
@@ -133,7 +159,9 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        block16 ? linear16_ : linear_,
+        half_weight
+            ? (block16 ? linear16_half_ : linear_half_)
+            : (block16 ? linear16_ : linear_),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),

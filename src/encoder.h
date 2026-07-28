@@ -6,6 +6,7 @@
 #include "vulkan.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace dav2 {
@@ -33,6 +34,7 @@ public:
 
 private:
     void select_linear_tile();
+    const VulkanBuffer& linear_weight(const std::string& name) const;
 
     dav2_encoder encoder_;
     VulkanContext& context_;
@@ -44,6 +46,7 @@ private:
     std::uint32_t capture_[4]{};
     bool linear_tile_selected_ = false;
     bool linear_block16_ = false;
+    bool linear_half_weight_ = false;
 };
 
 }  // namespace dav2
