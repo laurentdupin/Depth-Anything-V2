@@ -190,6 +190,7 @@ VulkanContext::~VulkanContext() {
 void VulkanContext::release() noexcept {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        cancel_batch();
         if (descriptor_pool_) {
             vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         }
@@ -337,6 +338,58 @@ void VulkanContext::end_commands(VkCommandBuffer command) {
     check(vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
     check(vkQueueWaitIdle(queue_), "vkQueueWaitIdle");
     vkFreeCommandBuffers(device_, command_pool_, 1, &command);
+}
+
+void VulkanContext::begin_batch() {
+    if (batch_command_ != VK_NULL_HANDLE) {
+        throw std::logic_error("nested Vulkan batch");
+    }
+    batch_command_ = begin_commands();
+    batch_has_dispatch_ = false;
+}
+
+void VulkanContext::release_batch_resources() noexcept {
+    if (!batch_descriptor_sets_.empty()) {
+        vkFreeDescriptorSets(
+            device_,
+            descriptor_pool_,
+            static_cast<std::uint32_t>(batch_descriptor_sets_.size()),
+            batch_descriptor_sets_.data());
+        batch_descriptor_sets_.clear();
+    }
+    for (const DeferredBuffer& buffer : batch_deferred_buffers_) {
+        if (buffer.mapped) {
+            vkUnmapMemory(device_, buffer.memory);
+        }
+        if (buffer.buffer) {
+            vkDestroyBuffer(device_, buffer.buffer, nullptr);
+        }
+        if (buffer.memory) {
+            vkFreeMemory(device_, buffer.memory, nullptr);
+        }
+    }
+    batch_deferred_buffers_.clear();
+}
+
+void VulkanContext::end_batch() {
+    if (batch_command_ == VK_NULL_HANDLE) {
+        throw std::logic_error("no active Vulkan batch");
+    }
+    VkCommandBuffer command = batch_command_;
+    batch_command_ = VK_NULL_HANDLE;
+    batch_has_dispatch_ = false;
+    end_commands(command);
+    release_batch_resources();
+}
+
+void VulkanContext::cancel_batch() noexcept {
+    if (batch_command_ != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(
+            device_, command_pool_, 1, &batch_command_);
+        batch_command_ = VK_NULL_HANDLE;
+    }
+    batch_has_dispatch_ = false;
+    release_batch_resources();
 }
 
 void VulkanContext::copy_buffer(
@@ -552,7 +605,28 @@ void VulkanContext::dispatch(
         0,
         nullptr);
 
-    VkCommandBuffer command = begin_commands();
+    const bool batched = batch_command_ != VK_NULL_HANDLE;
+    VkCommandBuffer command =
+        batched ? batch_command_ : begin_commands();
+    if (batched && batch_has_dispatch_) {
+        const VkMemoryBarrier barrier{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        vkCmdPipelineBarrier(
+            command,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1,
+            &barrier,
+            0,
+            nullptr,
+            0,
+            nullptr);
+    }
     vkCmdBindPipeline(
         command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_);
     vkCmdBindDescriptorSets(
@@ -574,14 +648,31 @@ void VulkanContext::dispatch(
             push_constants);
     }
     vkCmdDispatch(command, group_x, group_y, group_z);
-    end_commands(command);
-    check(
-        vkFreeDescriptorSets(
-            device_, descriptor_pool_, 1, &descriptor_set),
-        "vkFreeDescriptorSets");
+    if (batched) {
+        batch_has_dispatch_ = true;
+        batch_descriptor_sets_.push_back(descriptor_set);
+    } else {
+        end_commands(command);
+        check(
+            vkFreeDescriptorSets(
+                device_, descriptor_pool_, 1, &descriptor_set),
+            "vkFreeDescriptorSets");
+    }
 }
 
 void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
+    if (batch_command_ != VK_NULL_HANDLE &&
+        (buffer.buffer_ != VK_NULL_HANDLE ||
+         buffer.memory_ != VK_NULL_HANDLE)) {
+        batch_deferred_buffers_.push_back(
+            {buffer.buffer_, buffer.memory_, buffer.mapped_});
+        buffer.owner_ = nullptr;
+        buffer.buffer_ = VK_NULL_HANDLE;
+        buffer.memory_ = VK_NULL_HANDLE;
+        buffer.mapped_ = nullptr;
+        buffer.size_ = 0;
+        return;
+    }
     if (buffer.mapped_) {
         vkUnmapMemory(device_, buffer.memory_);
     }

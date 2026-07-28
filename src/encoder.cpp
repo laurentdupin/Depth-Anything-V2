@@ -94,16 +94,18 @@ EncoderOutput DinoEncoder::forward(
     VulkanBuffer hidden =
         context_.create_device_buffer(token_bytes * 4);
 
-    operators_.prepare_tokens(
-        current,
-        image,
-        buffer(weights_, "pretrained.patch_embed.proj.weight"),
-        buffer(weights_, "pretrained.patch_embed.proj.bias"),
-        buffer(weights_, "pretrained.cls_token"),
-        buffer(weights_, "pretrained.pos_embed"),
-        width,
-        height,
-        embedding_);
+    context_.batch([&] {
+        operators_.prepare_tokens(
+            current,
+            image,
+            buffer(weights_, "pretrained.patch_embed.proj.weight"),
+            buffer(weights_, "pretrained.patch_embed.proj.bias"),
+            buffer(weights_, "pretrained.cls_token"),
+            buffer(weights_, "pretrained.pos_embed"),
+            width,
+            height,
+            embedding_);
+    });
 
     EncoderOutput result;
     result.features.reserve(4);
@@ -114,95 +116,97 @@ EncoderOutput DinoEncoder::forward(
     std::uint32_t capture_index = 0;
 
     for (std::uint32_t block = 0; block < blocks_; ++block) {
-        operators_.layer_norm(
-            normalized,
-            current,
-            buffer(weights_, block_name(block, ".norm1.weight")),
-            buffer(weights_, block_name(block, ".norm1.bias")),
-            tokens,
-            embedding_,
-            1.0e-6f);
-        operators_.linear(
-            qkv,
-            normalized,
-            buffer(weights_, block_name(block, ".attn.qkv.weight")),
-            buffer(weights_, block_name(block, ".attn.qkv.bias")),
-            tokens,
-            embedding_,
-            embedding_ * 3,
-            false);
-        operators_.split_qkv(
-            query, key, value, qkv, tokens, heads_);
-        operators_.attention_head64(
-            attention, query, key, value, tokens, heads_);
-        operators_.merge_heads(qkv, attention, tokens, heads_);
-        operators_.linear(
-            query,
-            qkv,
-            buffer(weights_, block_name(block, ".attn.proj.weight")),
-            buffer(weights_, block_name(block, ".attn.proj.bias")),
-            tokens,
-            embedding_,
-            embedding_,
-            false);
-        operators_.add_scaled(
-            next,
-            current,
-            query,
-            buffer(weights_, block_name(block, ".ls1.gamma")),
-            static_cast<std::uint32_t>(token_elements),
-            embedding_);
-        std::swap(current, next);
-
-        operators_.layer_norm(
-            normalized,
-            current,
-            buffer(weights_, block_name(block, ".norm2.weight")),
-            buffer(weights_, block_name(block, ".norm2.bias")),
-            tokens,
-            embedding_,
-            1.0e-6f);
-        operators_.linear(
-            hidden,
-            normalized,
-            buffer(weights_, block_name(block, ".mlp.fc1.weight")),
-            buffer(weights_, block_name(block, ".mlp.fc1.bias")),
-            tokens,
-            embedding_,
-            embedding_ * 4,
-            true);
-        operators_.linear(
-            query,
-            hidden,
-            buffer(weights_, block_name(block, ".mlp.fc2.weight")),
-            buffer(weights_, block_name(block, ".mlp.fc2.bias")),
-            tokens,
-            embedding_ * 4,
-            embedding_,
-            false);
-        operators_.add_scaled(
-            next,
-            current,
-            query,
-            buffer(weights_, block_name(block, ".ls2.gamma")),
-            static_cast<std::uint32_t>(token_elements),
-            embedding_);
-        std::swap(current, next);
-
-        if (capture_index < 4 && block == capture_[capture_index]) {
-            VulkanBuffer feature =
-                context_.create_device_buffer(token_bytes);
+        context_.batch([&] {
             operators_.layer_norm(
-                feature,
+                normalized,
                 current,
-                buffer(weights_, "pretrained.norm.weight"),
-                buffer(weights_, "pretrained.norm.bias"),
+                buffer(weights_, block_name(block, ".norm1.weight")),
+                buffer(weights_, block_name(block, ".norm1.bias")),
                 tokens,
                 embedding_,
                 1.0e-6f);
-            result.features.push_back(std::move(feature));
-            ++capture_index;
-        }
+            operators_.linear(
+                qkv,
+                normalized,
+                buffer(weights_, block_name(block, ".attn.qkv.weight")),
+                buffer(weights_, block_name(block, ".attn.qkv.bias")),
+                tokens,
+                embedding_,
+                embedding_ * 3,
+                false);
+            operators_.split_qkv(
+                query, key, value, qkv, tokens, heads_);
+            operators_.attention_head64(
+                attention, query, key, value, tokens, heads_);
+            operators_.merge_heads(qkv, attention, tokens, heads_);
+            operators_.linear(
+                query,
+                qkv,
+                buffer(weights_, block_name(block, ".attn.proj.weight")),
+                buffer(weights_, block_name(block, ".attn.proj.bias")),
+                tokens,
+                embedding_,
+                embedding_,
+                false);
+            operators_.add_scaled(
+                next,
+                current,
+                query,
+                buffer(weights_, block_name(block, ".ls1.gamma")),
+                static_cast<std::uint32_t>(token_elements),
+                embedding_);
+            std::swap(current, next);
+
+            operators_.layer_norm(
+                normalized,
+                current,
+                buffer(weights_, block_name(block, ".norm2.weight")),
+                buffer(weights_, block_name(block, ".norm2.bias")),
+                tokens,
+                embedding_,
+                1.0e-6f);
+            operators_.linear(
+                hidden,
+                normalized,
+                buffer(weights_, block_name(block, ".mlp.fc1.weight")),
+                buffer(weights_, block_name(block, ".mlp.fc1.bias")),
+                tokens,
+                embedding_,
+                embedding_ * 4,
+                true);
+            operators_.linear(
+                query,
+                hidden,
+                buffer(weights_, block_name(block, ".mlp.fc2.weight")),
+                buffer(weights_, block_name(block, ".mlp.fc2.bias")),
+                tokens,
+                embedding_ * 4,
+                embedding_,
+                false);
+            operators_.add_scaled(
+                next,
+                current,
+                query,
+                buffer(weights_, block_name(block, ".ls2.gamma")),
+                static_cast<std::uint32_t>(token_elements),
+                embedding_);
+            std::swap(current, next);
+
+            if (capture_index < 4 && block == capture_[capture_index]) {
+                VulkanBuffer feature =
+                    context_.create_device_buffer(token_bytes);
+                operators_.layer_norm(
+                    feature,
+                    current,
+                    buffer(weights_, "pretrained.norm.weight"),
+                    buffer(weights_, "pretrained.norm.bias"),
+                    tokens,
+                    embedding_,
+                    1.0e-6f);
+                result.features.push_back(std::move(feature));
+                ++capture_index;
+            }
+        });
     }
     if (result.features.size() != 4) {
         throw std::runtime_error("encoder did not produce four features");

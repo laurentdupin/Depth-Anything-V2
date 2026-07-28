@@ -415,12 +415,16 @@ void VulkanOperators::prepare_tokens(
          static_cast<std::int32_t>(patch_width),
          static_cast<std::int32_t>(patch_height)},
         {
-            static_cast<float>(
-                1.0 /
-                ((static_cast<double>(patch_width) + 0.1) / 37.0)),
-            static_cast<float>(
-                1.0 /
-                ((static_cast<double>(patch_height) + 0.1) / 37.0)),
+            patch_width == 37 && patch_height == 37
+                ? 1.0f
+                : static_cast<float>(
+                    1.0 /
+                    ((static_cast<double>(patch_width) + 0.1) / 37.0)),
+            patch_width == 37 && patch_height == 37
+                ? 1.0f
+                : static_cast<float>(
+                    1.0 /
+                    ((static_cast<double>(patch_height) + 0.1) / 37.0)),
             0.0f,
             0.0f,
         },

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dav2 {
@@ -92,6 +93,22 @@ public:
         std::uint32_t group_y = 1,
         std::uint32_t group_z = 1);
 
+    template <typename Function>
+    void batch(Function&& function) {
+        if (batch_command_ != VK_NULL_HANDLE) {
+            std::forward<Function>(function)();
+            return;
+        }
+        begin_batch();
+        try {
+            std::forward<Function>(function)();
+            end_batch();
+        } catch (...) {
+            cancel_batch();
+            throw;
+        }
+    }
+
 private:
     friend class VulkanBuffer;
     friend class VulkanPipeline;
@@ -109,6 +126,10 @@ private:
         VkDeviceSize bytes);
     VkCommandBuffer begin_commands();
     void end_commands(VkCommandBuffer command_buffer);
+    void begin_batch();
+    void end_batch();
+    void cancel_batch() noexcept;
+    void release_batch_resources() noexcept;
     void destroy(VulkanBuffer& buffer) noexcept;
     void destroy(VulkanPipeline& pipeline) noexcept;
     void release() noexcept;
@@ -122,6 +143,15 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    struct DeferredBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+    };
+    VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
+    bool batch_has_dispatch_ = false;
+    std::vector<VkDescriptorSet> batch_descriptor_sets_;
+    std::vector<DeferredBuffer> batch_deferred_buffers_;
     std::string device_name_;
 };
 
