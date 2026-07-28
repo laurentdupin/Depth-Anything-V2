@@ -163,7 +163,9 @@ private:
     std::vector<BatchedDescriptor> batch_descriptor_sets_;
     std::vector<DeferredBuffer> batch_deferred_buffers_;
     std::vector<DeferredBuffer> device_buffer_pool_;
+    std::vector<DeferredBuffer> host_buffer_pool_;
     VkDeviceSize pooled_device_bytes_ = 0;
+    VkDeviceSize pooled_host_bytes_ = 0;
     std::string device_name_;
 };
 

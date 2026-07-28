@@ -200,6 +200,12 @@ void VulkanContext::release() noexcept {
         }
         device_buffer_pool_.clear();
         pooled_device_bytes_ = 0;
+        for (DeferredBuffer& buffer : host_buffer_pool_) {
+            buffer.cacheable = false;
+            recycle_or_destroy(buffer);
+        }
+        host_buffer_pool_.clear();
+        pooled_host_bytes_ = 0;
         if (descriptor_pool_) {
             vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         }
@@ -312,7 +318,29 @@ VulkanBuffer VulkanContext::create_device_buffer(VkDeviceSize bytes) {
 }
 
 VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
-    return create_buffer(
+    auto best = host_buffer_pool_.end();
+    for (auto candidate = host_buffer_pool_.begin();
+         candidate != host_buffer_pool_.end();
+         ++candidate) {
+        if (candidate->size >= bytes &&
+            (best == host_buffer_pool_.end() ||
+             candidate->size < best->size)) {
+            best = candidate;
+        }
+    }
+    if (best != host_buffer_pool_.end()) {
+        VulkanBuffer result;
+        result.owner_ = this;
+        result.buffer_ = best->buffer;
+        result.memory_ = best->memory;
+        result.size_ = best->size;
+        result.mapped_ = best->mapped;
+        result.cacheable_ = true;
+        pooled_host_bytes_ -= best->size;
+        host_buffer_pool_.erase(best);
+        return result;
+    }
+    VulkanBuffer result = create_buffer(
         bytes,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -320,6 +348,8 @@ VulkanBuffer VulkanContext::create_host_buffer(VkDeviceSize bytes) {
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    result.cacheable_ = true;
+    return result;
 }
 
 void VulkanContext::write_host(
@@ -725,13 +755,24 @@ void VulkanContext::destroy(VulkanBuffer& buffer) noexcept {
 
 void VulkanContext::recycle_or_destroy(
     DeferredBuffer buffer) noexcept {
-    constexpr VkDeviceSize maximum_pool_bytes =
+    constexpr VkDeviceSize maximum_device_pool_bytes =
         VkDeviceSize{2} * 1024 * 1024 * 1024;
-    if (buffer.cacheable && buffer.buffer && buffer.memory &&
-        buffer.size <= maximum_pool_bytes - pooled_device_bytes_) {
-        pooled_device_bytes_ += buffer.size;
-        device_buffer_pool_.push_back(buffer);
-        return;
+    constexpr VkDeviceSize maximum_host_pool_bytes =
+        VkDeviceSize{64} * 1024 * 1024;
+    if (buffer.cacheable && buffer.buffer && buffer.memory) {
+        if (buffer.mapped &&
+            buffer.size <= maximum_host_pool_bytes - pooled_host_bytes_) {
+            pooled_host_bytes_ += buffer.size;
+            host_buffer_pool_.push_back(buffer);
+            return;
+        }
+        if (!buffer.mapped &&
+            buffer.size <=
+                maximum_device_pool_bytes - pooled_device_bytes_) {
+            pooled_device_bytes_ += buffer.size;
+            device_buffer_pool_.push_back(buffer);
+            return;
+        }
     }
     if (buffer.mapped) {
         vkUnmapMemory(device_, buffer.memory);
