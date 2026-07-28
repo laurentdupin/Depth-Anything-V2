@@ -59,6 +59,17 @@ public:
         std::uint32_t tokens,
         std::uint32_t heads);
 
+    void prepare_tokens(
+        VulkanBuffer& output,
+        const VulkanBuffer& image,
+        const VulkanBuffer& patch_weight,
+        const VulkanBuffer& patch_bias,
+        const VulkanBuffer& class_token,
+        const VulkanBuffer& position,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t embedding);
+
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
@@ -68,6 +79,7 @@ private:
     VulkanPipeline split_qkv_;
     VulkanPipeline attention_head64_;
     VulkanPipeline merge_heads_;
+    VulkanPipeline prepare_tokens_;
 };
 
 }  // namespace dav2

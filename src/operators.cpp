@@ -5,6 +5,7 @@
 #include "linear_gelu_spv.h"
 #include "linear_spv.h"
 #include "merge_heads_spv.h"
+#include "prepare_tokens_spv.h"
 #include "split_qkv_spv.h"
 #include "attention_head64_spv.h"
 
@@ -50,7 +51,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           4,
           8)),
       merge_heads_(context.create_pipeline(
-          dav2_merge_heads_spv, dav2_merge_heads_spv_size, 2, 8)) {}
+          dav2_merge_heads_spv, dav2_merge_heads_spv_size, 2, 8)),
+      prepare_tokens_(context.create_pipeline(
+          dav2_prepare_tokens_spv,
+          dav2_prepare_tokens_spv_size,
+          6,
+          20)) {}
 
 void VulkanOperators::linear(
     VulkanBuffer& output,
@@ -226,6 +232,64 @@ void VulkanOperators::merge_heads(
         8,
         divide_up(tokens, 8),
         heads);
+}
+
+void VulkanOperators::prepare_tokens(
+    VulkanBuffer& output,
+    const VulkanBuffer& image,
+    const VulkanBuffer& patch_weight,
+    const VulkanBuffer& patch_bias,
+    const VulkanBuffer& class_token,
+    const VulkanBuffer& position,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t embedding) {
+    if (input_width == 0 || input_height == 0 ||
+        input_width % 14 != 0 || input_height % 14 != 0 ||
+        embedding == 0) {
+        throw std::invalid_argument("invalid patch embedding dimensions");
+    }
+    const std::uint32_t patch_width = input_width / 14;
+    const std::uint32_t patch_height = input_height / 14;
+    const std::uint64_t tokens =
+        std::uint64_t(patch_width) * patch_height + 1;
+    require_bytes(
+        image, std::uint64_t(input_width) * input_height * 3, "image");
+    require_bytes(
+        patch_weight, std::uint64_t(embedding) * 3 * 14 * 14,
+        "patch weight");
+    require_bytes(patch_bias, embedding, "patch bias");
+    require_bytes(class_token, embedding, "class token");
+    require_bytes(
+        position, std::uint64_t(1370) * embedding, "position");
+    require_bytes(output, tokens * embedding, "token output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t patch_width;
+        std::uint32_t patch_height;
+        std::uint32_t embedding;
+    } parameters{
+        input_width,
+        input_height,
+        patch_width,
+        patch_height,
+        embedding,
+    };
+    context_.dispatch(
+        prepare_tokens_,
+        {
+            &output,
+            &image,
+            &patch_weight,
+            &patch_bias,
+            &class_token,
+            &position,
+        },
+        &parameters,
+        sizeof(parameters),
+        divide_up(embedding, 8),
+        divide_up(static_cast<std::uint32_t>(tokens), 8));
 }
 
 }  // namespace dav2

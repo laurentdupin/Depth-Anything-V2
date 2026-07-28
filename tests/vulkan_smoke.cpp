@@ -17,6 +17,16 @@ void expect_near(float actual, float expected, float tolerance) {
     assert(std::abs(actual - expected) <= tolerance);
 }
 
+float cubic1(float x) {
+    constexpr float a = -0.75f;
+    return ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
+}
+
+float cubic2(float x) {
+    constexpr float a = -0.75f;
+    return ((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a;
+}
+
 }  // namespace
 
 int main() {
@@ -353,6 +363,128 @@ int main() {
                 expect_near(
                     merged[token * attention_embedding +
                         head * 64 + feature],
+                    expected,
+                    2.0e-6f);
+            }
+        }
+    }
+
+    const std::uint32_t token_width = 42;
+    const std::uint32_t token_height = 28;
+    const std::uint32_t token_embedding = 3;
+    std::vector<float> token_image(
+        token_width * token_height * 3, 0.0f);
+    std::vector<float> patch_weight(
+        token_embedding * 3 * 14 * 14, 0.0f);
+    std::vector<float> patch_bias{0.25f, -0.5f, 0.75f};
+    std::vector<float> class_token{1.0f, 2.0f, 3.0f};
+    std::vector<float> position(1370 * token_embedding);
+    for (std::size_t index = 0; index < position.size(); ++index) {
+        position[index] =
+            (static_cast<int>(index % 31) - 15) * 0.015625f;
+    }
+    auto gpu_token_image =
+        context.create_device_buffer(token_image.size() * sizeof(float));
+    auto gpu_patch_weight =
+        context.create_device_buffer(patch_weight.size() * sizeof(float));
+    auto gpu_patch_bias =
+        context.create_device_buffer(patch_bias.size() * sizeof(float));
+    auto gpu_class_token =
+        context.create_device_buffer(class_token.size() * sizeof(float));
+    auto gpu_position =
+        context.create_device_buffer(position.size() * sizeof(float));
+    auto gpu_tokens = context.create_device_buffer(
+        (1 + (token_width / 14) * (token_height / 14)) *
+        token_embedding * sizeof(float));
+    context.upload(
+        gpu_token_image,
+        token_image.data(),
+        token_image.size() * sizeof(float));
+    context.upload(
+        gpu_patch_weight,
+        patch_weight.data(),
+        patch_weight.size() * sizeof(float));
+    context.upload(
+        gpu_patch_bias,
+        patch_bias.data(),
+        patch_bias.size() * sizeof(float));
+    context.upload(
+        gpu_class_token,
+        class_token.data(),
+        class_token.size() * sizeof(float));
+    context.upload(
+        gpu_position,
+        position.data(),
+        position.size() * sizeof(float));
+    operators.prepare_tokens(
+        gpu_tokens,
+        gpu_token_image,
+        gpu_patch_weight,
+        gpu_patch_bias,
+        gpu_class_token,
+        gpu_position,
+        token_width,
+        token_height,
+        token_embedding);
+    std::vector<float> tokens(7 * token_embedding);
+    context.download(
+        gpu_tokens, tokens.data(), tokens.size() * sizeof(float));
+    for (std::uint32_t feature = 0; feature < token_embedding; ++feature) {
+        expect_near(
+            tokens[feature],
+            class_token[feature] + position[feature],
+            0.0f);
+    }
+    const std::uint32_t patch_width = token_width / 14;
+    const std::uint32_t patch_height = token_height / 14;
+    for (std::uint32_t patch_y = 0; patch_y < patch_height; ++patch_y) {
+        for (std::uint32_t patch_x = 0; patch_x < patch_width; ++patch_x) {
+            const float source_x =
+                (patch_x + 0.5f) * (37.0f / (patch_width + 0.1f)) -
+                0.5f;
+            const float source_y =
+                (patch_y + 0.5f) * (37.0f / (patch_height + 0.1f)) -
+                0.5f;
+            const int base_x = static_cast<int>(std::floor(source_x));
+            const int base_y = static_cast<int>(std::floor(source_y));
+            const float fraction_x = source_x - base_x;
+            const float fraction_y = source_y - base_y;
+            const float x_coefficients[4] = {
+                cubic2(fraction_x + 1.0f),
+                cubic1(fraction_x),
+                cubic1(1.0f - fraction_x),
+                cubic2(2.0f - fraction_x),
+            };
+            const float y_coefficients[4] = {
+                cubic2(fraction_y + 1.0f),
+                cubic1(fraction_y),
+                cubic1(1.0f - fraction_y),
+                cubic2(2.0f - fraction_y),
+            };
+            for (std::uint32_t feature = 0;
+                 feature < token_embedding;
+                 ++feature) {
+                float rows[4]{};
+                for (int row = 0; row < 4; ++row) {
+                    const int y = std::clamp(base_y - 1 + row, 0, 36);
+                    for (int column = 0; column < 4; ++column) {
+                        const int x =
+                            std::clamp(base_x - 1 + column, 0, 36);
+                        rows[row] +=
+                            position[
+                                (1 + y * 37 + x) * token_embedding +
+                                feature] *
+                            x_coefficients[column];
+                    }
+                }
+                float expected = patch_bias[feature];
+                for (int row = 0; row < 4; ++row) {
+                    expected += rows[row] * y_coefficients[row];
+                }
+                const std::uint32_t patch =
+                    patch_y * patch_width + patch_x;
+                expect_near(
+                    tokens[(patch + 1) * token_embedding + feature],
                     expected,
                     2.0e-6f);
             }
