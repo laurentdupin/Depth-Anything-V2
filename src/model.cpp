@@ -5,6 +5,13 @@
 #include <stdexcept>
 #include <string>
 
+#if !defined(_WIN32)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
+
 namespace dav2 {
 namespace {
 
@@ -65,8 +72,8 @@ bool range_valid(std::uint64_t offset, std::uint64_t bytes, std::uint64_t limit)
     return offset <= limit && bytes <= limit - offset;
 }
 
-std::wstring utf8_to_wide(const std::string& text) {
 #if defined(_WIN32)
+std::wstring utf8_to_wide(const std::string& text) {
     if (text.empty()) {
         throw std::invalid_argument("model path is empty");
     }
@@ -83,23 +90,16 @@ std::wstring utf8_to_wide(const std::string& text) {
         throw std::invalid_argument("failed to decode model path");
     }
     return result;
-#else
-    (void)text;
-    return {};
-#endif
 }
+#endif
 
 }  // namespace
 
 ModelFile::ModelFile(
     const std::string& path_utf8,
     dav2_encoder expected_encoder) {
-#if !defined(_WIN32)
-    (void)path_utf8;
-    (void)expected_encoder;
-    throw std::runtime_error("model mapping is not implemented on this platform");
-#else
     try {
+#if defined(_WIN32)
         const std::wstring path = utf8_to_wide(path_utf8);
         file_ = CreateFileW(
             path.c_str(),
@@ -130,6 +130,37 @@ ModelFile::ModelFile(
         if (!view_) {
             throw std::runtime_error("failed to view model file");
         }
+#else
+        if (path_utf8.empty()) {
+            throw std::invalid_argument("model path is empty");
+        }
+        file_descriptor_ = open(path_utf8.c_str(), O_RDONLY | O_CLOEXEC);
+        if (file_descriptor_ < 0) {
+            throw std::runtime_error("failed to open model file");
+        }
+        struct stat file_status {};
+        if (fstat(file_descriptor_, &file_status) != 0 ||
+            file_status.st_size < 0) {
+            throw std::runtime_error("failed to query model file size");
+        }
+        size_ = static_cast<std::uint64_t>(file_status.st_size);
+        if (size_ < sizeof(FileHeader) ||
+            size_ > static_cast<std::uint64_t>(
+                        std::numeric_limits<std::size_t>::max())) {
+            throw std::runtime_error("model file is truncated or too large");
+        }
+        void* mapped = mmap(
+            nullptr,
+            static_cast<std::size_t>(size_),
+            PROT_READ,
+            MAP_PRIVATE,
+            file_descriptor_,
+            0);
+        if (mapped == MAP_FAILED) {
+            throw std::runtime_error("failed to map model file");
+        }
+        view_ = static_cast<const std::byte*>(mapped);
+#endif
 
         const auto& header =
             *reinterpret_cast<const FileHeader*>(view_);
@@ -264,7 +295,6 @@ ModelFile::ModelFile(
         close();
         throw;
     }
-#endif
 }
 
 ModelFile::~ModelFile() {
@@ -272,9 +302,9 @@ ModelFile::~ModelFile() {
 }
 
 void ModelFile::close() noexcept {
-#if defined(_WIN32)
     tensors_.clear();
     tensor_names_.clear();
+#if defined(_WIN32)
     if (view_) {
         UnmapViewOfFile(view_);
         view_ = nullptr;
@@ -287,8 +317,19 @@ void ModelFile::close() noexcept {
         CloseHandle(file_);
         file_ = INVALID_HANDLE_VALUE;
     }
-    size_ = 0;
+#else
+    if (view_) {
+        munmap(
+            const_cast<std::byte*>(view_),
+            static_cast<std::size_t>(size_));
+        view_ = nullptr;
+    }
+    if (file_descriptor_ >= 0) {
+        ::close(file_descriptor_);
+        file_descriptor_ = -1;
+    }
 #endif
+    size_ = 0;
 }
 
 const TensorView& ModelFile::tensor(std::string_view name) const {

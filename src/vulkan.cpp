@@ -176,7 +176,8 @@ VulkanPipeline::~VulkanPipeline() {
     if (owner_) owner_->destroy(*this);
 }
 
-VulkanContext::VulkanContext(std::uint32_t device_index) try {
+VulkanContext::VulkanContext(std::uint32_t device_index) {
+    try {
     const VkApplicationInfo application{
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
         nullptr,
@@ -434,9 +435,10 @@ VulkanContext::VulkanContext(std::uint32_t device_index) try {
         vkCreateDescriptorPool(
             device_, &descriptor_pool_info, nullptr, &descriptor_pool_),
         "vkCreateDescriptorPool");
-} catch (...) {
-    release();
-    throw;
+    } catch (...) {
+        release();
+        throw;
+    }
 }
 
 VulkanContext::~VulkanContext() {

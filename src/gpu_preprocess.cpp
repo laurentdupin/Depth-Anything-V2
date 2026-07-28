@@ -72,7 +72,8 @@ void GpuPreprocessor::run(
     } parameters{
         source_width,
         source_height,
-        source_row_stride_bytes / sizeof(std::uint32_t),
+        static_cast<std::uint32_t>(
+            source_row_stride_bytes / sizeof(std::uint32_t)),
         destination_width,
         destination_height,
         static_cast<std::uint32_t>(order),

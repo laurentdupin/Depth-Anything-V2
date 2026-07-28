@@ -57,6 +57,8 @@ private:
 #if defined(_WIN32)
     HANDLE file_ = INVALID_HANDLE_VALUE;
     HANDLE mapping_ = nullptr;
+#else
+    int file_descriptor_ = -1;
 #endif
     const std::byte* view_ = nullptr;
     std::uint64_t size_ = 0;

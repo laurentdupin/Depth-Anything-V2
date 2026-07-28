@@ -105,6 +105,11 @@ the caller owns preprocessing. See
 [`include/depth_anything_v2.h`](include/depth_anything_v2.h) and
 [`docs/architecture.md`](docs/architecture.md) for the full contract.
 
+The same runtime builds for Android arm64 and has been validated as a
+standalone Vulkan process on Meta Quest 3S. See
+[`docs/android.md`](docs/android.md) for the reproducible Unity-NDK build and
+device command.
+
 ### Prepraration
 
 ```bash
