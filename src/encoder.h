@@ -32,6 +32,8 @@ public:
         std::uint32_t height);
 
 private:
+    void select_linear_tile();
+
     dav2_encoder encoder_;
     VulkanContext& context_;
     const GpuModel& weights_;
@@ -40,6 +42,8 @@ private:
     std::uint32_t heads_ = 0;
     std::uint32_t blocks_ = 0;
     std::uint32_t capture_[4]{};
+    bool linear_tile_selected_ = false;
+    bool linear_block16_ = false;
 };
 
 }  // namespace dav2
