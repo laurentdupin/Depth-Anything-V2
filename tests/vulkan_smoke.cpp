@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -259,6 +260,99 @@ int main() {
             residual[index] +
                 addend[index] * scale[index % scaled_columns],
             0.0f);
+    }
+
+    const std::uint32_t attention_tokens = 5;
+    const std::uint32_t attention_heads = 2;
+    const std::uint32_t attention_embedding = attention_heads * 64;
+    std::vector<float> qkv(
+        attention_tokens * attention_embedding * 3);
+    for (std::size_t index = 0; index < qkv.size(); ++index) {
+        qkv[index] =
+            (static_cast<int>(index % 29) - 14) * 0.0078125f;
+    }
+    const std::size_t attention_elements =
+        attention_tokens * attention_embedding;
+    auto gpu_qkv =
+        context.create_device_buffer(qkv.size() * sizeof(float));
+    auto gpu_query =
+        context.create_device_buffer(attention_elements * sizeof(float));
+    auto gpu_key =
+        context.create_device_buffer(attention_elements * sizeof(float));
+    auto gpu_value =
+        context.create_device_buffer(attention_elements * sizeof(float));
+    auto gpu_attention =
+        context.create_device_buffer(attention_elements * sizeof(float));
+    auto gpu_merged =
+        context.create_device_buffer(attention_elements * sizeof(float));
+    context.upload(gpu_qkv, qkv.data(), qkv.size() * sizeof(float));
+    operators.split_qkv(
+        gpu_query,
+        gpu_key,
+        gpu_value,
+        gpu_qkv,
+        attention_tokens,
+        attention_heads);
+    operators.attention_head64(
+        gpu_attention,
+        gpu_query,
+        gpu_key,
+        gpu_value,
+        attention_tokens,
+        attention_heads);
+    operators.merge_heads(
+        gpu_merged,
+        gpu_attention,
+        attention_tokens,
+        attention_heads);
+    std::vector<float> merged(attention_elements);
+    context.download(
+        gpu_merged, merged.data(), merged.size() * sizeof(float));
+    for (std::uint32_t token = 0; token < attention_tokens; ++token) {
+        for (std::uint32_t head = 0; head < attention_heads; ++head) {
+            std::vector<float> scores(attention_tokens);
+            float maximum = -std::numeric_limits<float>::max();
+            for (std::uint32_t source = 0;
+                 source < attention_tokens;
+                 ++source) {
+                float score = 0.0f;
+                for (std::uint32_t feature = 0; feature < 64; ++feature) {
+                    const std::size_t query_index =
+                        token * attention_embedding * 3 +
+                        head * 64 + feature;
+                    const std::size_t key_index =
+                        source * attention_embedding * 3 +
+                        attention_embedding + head * 64 + feature;
+                    score += qkv[query_index] * 0.125f *
+                        qkv[key_index];
+                }
+                scores[source] = score;
+                maximum = std::max(maximum, score);
+            }
+            float denominator = 0.0f;
+            for (float& score : scores) {
+                score = std::exp(score - maximum);
+                denominator += score;
+            }
+            for (std::uint32_t feature = 0; feature < 64; ++feature) {
+                float expected = 0.0f;
+                for (std::uint32_t source = 0;
+                     source < attention_tokens;
+                     ++source) {
+                    const std::size_t value_index =
+                        source * attention_embedding * 3 +
+                        attention_embedding * 2 +
+                        head * 64 + feature;
+                    expected += scores[source] / denominator *
+                        qkv[value_index];
+                }
+                expect_near(
+                    merged[token * attention_embedding +
+                        head * 64 + feature],
+                    expected,
+                    2.0e-6f);
+            }
+        }
     }
     std::cout << context.device_name() << '\n';
     return 0;

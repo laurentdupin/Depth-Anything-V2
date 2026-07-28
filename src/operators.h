@@ -37,12 +37,37 @@ public:
         std::uint32_t count,
         std::uint32_t columns);
 
+    void split_qkv(
+        VulkanBuffer& query,
+        VulkanBuffer& key,
+        VulkanBuffer& value,
+        const VulkanBuffer& qkv,
+        std::uint32_t tokens,
+        std::uint32_t heads);
+
+    void attention_head64(
+        VulkanBuffer& output,
+        const VulkanBuffer& query,
+        const VulkanBuffer& key,
+        const VulkanBuffer& value,
+        std::uint32_t tokens,
+        std::uint32_t heads);
+
+    void merge_heads(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        std::uint32_t tokens,
+        std::uint32_t heads);
+
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
     VulkanPipeline linear_gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;
+    VulkanPipeline split_qkv_;
+    VulkanPipeline attention_head64_;
+    VulkanPipeline merge_heads_;
 };
 
 }  // namespace dav2

@@ -50,6 +50,9 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(linear_gelu)
     dav2_compile_shader(layer_norm)
     dav2_compile_shader(add_scaled)
+    dav2_compile_shader(split_qkv)
+    dav2_compile_shader(attention_head64)
+    dav2_compile_shader(merge_heads)
 endif()
 
 add_library(depth_anything_v2 SHARED

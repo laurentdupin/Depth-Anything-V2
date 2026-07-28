@@ -4,6 +4,9 @@
 #include "layer_norm_spv.h"
 #include "linear_gelu_spv.h"
 #include "linear_spv.h"
+#include "merge_heads_spv.h"
+#include "split_qkv_spv.h"
+#include "attention_head64_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -38,7 +41,16 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       layer_norm_(context.create_pipeline(
           dav2_layer_norm_spv, dav2_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
-          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)) {}
+          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
+      split_qkv_(context.create_pipeline(
+          dav2_split_qkv_spv, dav2_split_qkv_spv_size, 4, 16)),
+      attention_head64_(context.create_pipeline(
+          dav2_attention_head64_spv,
+          dav2_attention_head64_spv_size,
+          4,
+          8)),
+      merge_heads_(context.create_pipeline(
+          dav2_merge_heads_spv, dav2_merge_heads_spv_size, 2, 8)) {}
 
 void VulkanOperators::linear(
     VulkanBuffer& output,
@@ -126,6 +138,94 @@ void VulkanOperators::add_scaled(
         &parameters,
         sizeof(parameters),
         divide_up(count, 256));
+}
+
+void VulkanOperators::split_qkv(
+    VulkanBuffer& query,
+    VulkanBuffer& key,
+    VulkanBuffer& value,
+    const VulkanBuffer& qkv,
+    std::uint32_t tokens,
+    std::uint32_t heads) {
+    if (tokens == 0 || heads == 0) {
+        throw std::invalid_argument("invalid QKV dimensions");
+    }
+    const std::uint64_t embedding = std::uint64_t(heads) * 64;
+    const std::uint64_t elements = std::uint64_t(tokens) * embedding;
+    require_bytes(qkv, elements * 3, "QKV");
+    require_bytes(query, elements, "query");
+    require_bytes(key, elements, "key");
+    require_bytes(value, elements, "value");
+    struct Parameters {
+        std::uint32_t tokens;
+        std::uint32_t heads;
+        std::uint32_t embedding;
+        float query_scale;
+    } parameters{tokens, heads, heads * 64, 0.125f};
+    context_.dispatch(
+        split_qkv_,
+        {&query, &key, &value, &qkv},
+        &parameters,
+        sizeof(parameters),
+        8,
+        divide_up(tokens, 8),
+        heads);
+}
+
+void VulkanOperators::attention_head64(
+    VulkanBuffer& output,
+    const VulkanBuffer& query,
+    const VulkanBuffer& key,
+    const VulkanBuffer& value,
+    std::uint32_t tokens,
+    std::uint32_t heads) {
+    if (tokens == 0 || heads == 0) {
+        throw std::invalid_argument("invalid attention dimensions");
+    }
+    const std::uint64_t elements =
+        std::uint64_t(tokens) * heads * 64;
+    require_bytes(output, elements, "attention output");
+    require_bytes(query, elements, "query");
+    require_bytes(key, elements, "key");
+    require_bytes(value, elements, "value");
+    struct Parameters {
+        std::uint32_t tokens;
+        std::uint32_t heads;
+    } parameters{tokens, heads};
+    context_.dispatch(
+        attention_head64_,
+        {&output, &query, &key, &value},
+        &parameters,
+        sizeof(parameters),
+        1,
+        divide_up(tokens, 4),
+        heads);
+}
+
+void VulkanOperators::merge_heads(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t tokens,
+    std::uint32_t heads) {
+    if (tokens == 0 || heads == 0) {
+        throw std::invalid_argument("invalid head merge dimensions");
+    }
+    const std::uint64_t elements =
+        std::uint64_t(tokens) * heads * 64;
+    require_bytes(output, elements, "merged output");
+    require_bytes(input, elements, "attention input");
+    struct Parameters {
+        std::uint32_t tokens;
+        std::uint32_t heads;
+    } parameters{tokens, heads};
+    context_.dispatch(
+        merge_heads_,
+        {&output, &input},
+        &parameters,
+        sizeof(parameters),
+        8,
+        divide_up(tokens, 8),
+        heads);
 }
 
 }  // namespace dav2
