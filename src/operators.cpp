@@ -5,6 +5,8 @@
 #include "add_position_spv.h"
 #include "bilinear_align_true_spv.h"
 #include "bmm_spv.h"
+#include "bmm_score_half_spv.h"
+#include "bmm_value_half_spv.h"
 #include "conv2d_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
@@ -23,6 +25,7 @@
 #include "project_tokens_half_spv.h"
 #include "relu_spv.h"
 #include "softmax_lastdim_spv.h"
+#include "softmax_lastdim_half_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -82,10 +85,25 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
       bmm_(context.create_pipeline(
           dav2_bmm_spv, dav2_bmm_spv_size, 3, 36)),
+      bmm_score_half_(context.create_pipeline(
+          dav2_bmm_score_half_spv,
+          dav2_bmm_score_half_spv_size,
+          2,
+          8)),
+      bmm_value_half_(context.create_pipeline(
+          dav2_bmm_value_half_spv,
+          dav2_bmm_value_half_spv_size,
+          3,
+          8)),
       softmax_lastdim_(context.create_pipeline(
           dav2_softmax_lastdim_spv,
           dav2_softmax_lastdim_spv_size,
           2,
+          8)),
+      softmax_lastdim_half_(context.create_pipeline(
+          dav2_softmax_lastdim_half_spv,
+          dav2_softmax_lastdim_half_spv_size,
+          1,
           8)),
       prepare_tokens_(context.create_pipeline(
           dav2_prepare_tokens_spv,
@@ -260,7 +278,8 @@ void VulkanOperators::attention_head64(
     const VulkanBuffer& qkv,
     std::uint32_t tokens,
     std::uint32_t heads,
-    VulkanBuffer* score_scratch) {
+    VulkanBuffer* score_scratch,
+    bool half_scores) {
     if (tokens == 0 || heads == 0) {
         throw std::invalid_argument("invalid attention dimensions");
     }
@@ -270,16 +289,56 @@ void VulkanOperators::attention_head64(
     require_bytes(qkv, elements * 3, "QKV");
     const std::uint64_t score_elements =
         std::uint64_t(heads) * tokens * tokens;
+    const std::uint64_t score_bytes = half_scores
+        ? std::uint64_t(heads) * tokens *
+            ((std::uint64_t(tokens) + 1) / 2) *
+            sizeof(std::uint32_t)
+        : score_elements * sizeof(float);
     VulkanBuffer owned_scores;
     if (score_scratch == nullptr) {
-        owned_scores =
-            context_.create_device_buffer(score_elements * sizeof(float));
+        owned_scores = context_.create_device_buffer(score_bytes);
         score_scratch = &owned_scores;
-    } else {
+    } else if (score_scratch->size() < score_bytes) {
+        throw std::invalid_argument(
+            "attention score scratch Vulkan buffer is too small");
+    } else if (!half_scores) {
         require_bytes(
             *score_scratch, score_elements, "attention score scratch");
     }
     VulkanBuffer& scores = *score_scratch;
+    if (half_scores) {
+        struct HalfParameters {
+            std::uint32_t tokens;
+            std::uint32_t heads;
+        } parameters{tokens, heads};
+        context_.dispatch(
+            bmm_score_half_,
+            {&scores, &qkv},
+            &parameters,
+            sizeof(parameters),
+            divide_up(divide_up(tokens, 4), 8),
+            divide_up(divide_up(tokens, 8), 8),
+            heads);
+        struct SoftmaxParameters {
+            std::uint32_t rows;
+            std::uint32_t columns;
+        } softmax_parameters{heads * tokens, tokens};
+        context_.dispatch(
+            softmax_lastdim_half_,
+            {&scores},
+            &softmax_parameters,
+            sizeof(softmax_parameters),
+            softmax_parameters.rows);
+        context_.dispatch(
+            bmm_value_half_,
+            {&output, &scores, &qkv},
+            &parameters,
+            sizeof(parameters),
+            divide_up(divide_up(64, 4), 8),
+            divide_up(divide_up(tokens, 8), 8),
+            heads);
+        return;
+    }
     struct BmmParameters {
         std::uint32_t rows;
         std::uint32_t columns;

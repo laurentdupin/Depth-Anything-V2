@@ -199,6 +199,81 @@ const VulkanBuffer& DinoEncoder::linear_weight(
     return linear_half_weight_ ? tensor.half_buffer : tensor.buffer;
 }
 
+bool DinoEncoder::select_half_attention(
+    const VulkanBuffer& current,
+    VulkanBuffer& normalized,
+    VulkanBuffer& qkv,
+    VulkanBuffer& attention,
+    std::uint32_t tokens) {
+    context_.batch([&] {
+        operators_.layer_norm(
+            normalized,
+            current,
+            buffer(weights_, block_name(0, ".norm1.weight")),
+            buffer(weights_, block_name(0, ".norm1.bias")),
+            tokens,
+            embedding_,
+            1.0e-6f);
+        operators_.linear(
+            qkv,
+            normalized,
+            linear_weight(block_name(0, ".attn.qkv.weight")),
+            buffer(weights_, block_name(0, ".attn.qkv.bias")),
+            tokens,
+            embedding_,
+            embedding_ * 3,
+            false,
+            linear_block16_,
+            linear_half_weight_);
+    });
+
+    VulkanBuffer fp32_scratch = context_.create_device_buffer(
+        std::uint64_t(heads_) * tokens * tokens * sizeof(float));
+    VulkanBuffer half_scratch = context_.create_device_buffer(
+        std::uint64_t(heads_) * tokens *
+        ((std::uint64_t(tokens) + 1) / 2) *
+        sizeof(std::uint32_t));
+    const std::uint32_t repetitions =
+        tokens < 256 ? 8 : (tokens < 768 ? 4 : 2);
+    const auto run = [&](bool half_scores) {
+        VulkanBuffer& scratch =
+            half_scores ? half_scratch : fp32_scratch;
+        const auto start = std::chrono::steady_clock::now();
+        context_.batch([&] {
+            for (std::uint32_t repetition = 0;
+                 repetition < repetitions;
+                 ++repetition) {
+                operators_.attention_head64(
+                    attention,
+                    qkv,
+                    tokens,
+                    heads_,
+                    &scratch,
+                    half_scores);
+            }
+        });
+        return std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    run(false);
+    run(true);
+    std::array<double, 3> fp32_samples{};
+    std::array<double, 3> half_samples{};
+    for (std::size_t sample = 0; sample < fp32_samples.size(); ++sample) {
+        if ((sample & 1u) == 0) {
+            fp32_samples[sample] = run(false);
+            half_samples[sample] = run(true);
+        } else {
+            half_samples[sample] = run(true);
+            fp32_samples[sample] = run(false);
+        }
+    }
+    std::sort(fp32_samples.begin(), fp32_samples.end());
+    std::sort(half_samples.begin(), half_samples.end());
+    return half_samples[half_samples.size() / 2] <
+        fp32_samples[fp32_samples.size() / 2] * 0.99;
+}
+
 EncoderOutput DinoEncoder::forward(
     const VulkanBuffer& image,
     std::uint32_t width,
@@ -227,9 +302,6 @@ EncoderOutput DinoEncoder::forward(
         context_.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden =
         context_.create_device_buffer(token_bytes * 4);
-    VulkanBuffer attention_scores = context_.create_device_buffer(
-        std::uint64_t(heads_) * tokens * tokens * sizeof(float));
-
     context_.batch([&] {
         operators_.prepare_tokens(
             current,
@@ -242,6 +314,28 @@ EncoderOutput DinoEncoder::forward(
             height,
             embedding_);
     });
+    const auto existing_attention =
+        half_attention_by_tokens_.find(tokens);
+    const bool half_attention =
+        existing_attention != half_attention_by_tokens_.end()
+        ? existing_attention->second
+        : half_attention_by_tokens_
+              .emplace(
+                  tokens,
+                  select_half_attention(
+                      current,
+                      normalized,
+                      qkv,
+                      attention,
+                      tokens))
+              .first->second;
+    const VkDeviceSize attention_score_bytes = half_attention
+        ? std::uint64_t(heads_) * tokens *
+            ((std::uint64_t(tokens) + 1) / 2) *
+            sizeof(std::uint32_t)
+        : std::uint64_t(heads_) * tokens * tokens * sizeof(float);
+    VulkanBuffer attention_scores =
+        context_.create_device_buffer(attention_score_bytes);
 
     EncoderOutput result;
     result.features.reserve(4);
@@ -273,7 +367,12 @@ EncoderOutput DinoEncoder::forward(
                 linear_block16_,
                 linear_half_weight_);
             operators_.attention_head64(
-                attention, qkv, tokens, heads_, &attention_scores);
+                attention,
+                qkv,
+                tokens,
+                heads_,
+                &attention_scores,
+                half_attention);
             operators_.linear(
                 query,
                 attention,

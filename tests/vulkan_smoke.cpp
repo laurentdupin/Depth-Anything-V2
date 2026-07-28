@@ -300,6 +300,7 @@ int main() {
     std::vector<float> merged(attention_elements);
     context.download(
         gpu_attention, merged.data(), merged.size() * sizeof(float));
+    const std::vector<float> fp32_attention = merged;
     for (std::uint32_t token = 0; token < attention_tokens; ++token) {
         for (std::uint32_t head = 0; head < attention_heads; ++head) {
             std::vector<float> scores(attention_tokens);
@@ -345,6 +346,22 @@ int main() {
                     2.0e-6f);
             }
         }
+    }
+
+    operators.attention_head64(
+        gpu_attention,
+        gpu_qkv,
+        attention_tokens,
+        attention_heads,
+        nullptr,
+        true);
+    context.download(
+        gpu_attention, merged.data(), merged.size() * sizeof(float));
+    for (std::size_t index = 0; index < merged.size(); ++index) {
+        expect_near(
+            merged[index],
+            fp32_attention[index],
+            2.0e-4f);
     }
 
     const std::uint32_t token_width = 42;

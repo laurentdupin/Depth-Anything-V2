@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dav2 {
@@ -34,6 +35,12 @@ public:
 
 private:
     void select_linear_tile();
+    bool select_half_attention(
+        const VulkanBuffer& current,
+        VulkanBuffer& normalized,
+        VulkanBuffer& qkv,
+        VulkanBuffer& attention,
+        std::uint32_t tokens);
     const VulkanBuffer& linear_weight(const std::string& name) const;
 
     dav2_encoder encoder_;
@@ -47,6 +54,7 @@ private:
     bool linear_tile_selected_ = false;
     bool linear_block16_ = false;
     bool linear_half_weight_ = false;
+    std::unordered_map<std::uint32_t, bool> half_attention_by_tokens_;
 };
 
 }  // namespace dav2

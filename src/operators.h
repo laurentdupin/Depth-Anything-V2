@@ -44,7 +44,8 @@ public:
         const VulkanBuffer& qkv,
         std::uint32_t tokens,
         std::uint32_t heads,
-        VulkanBuffer* score_scratch = nullptr);
+        VulkanBuffer* score_scratch = nullptr,
+        bool half_scores = false);
 
     void prepare_tokens(
         VulkanBuffer& output,
@@ -123,7 +124,10 @@ private:
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;
     VulkanPipeline bmm_;
+    VulkanPipeline bmm_score_half_;
+    VulkanPipeline bmm_value_half_;
     VulkanPipeline softmax_lastdim_;
+    VulkanPipeline softmax_lastdim_half_;
     VulkanPipeline prepare_tokens_;
     VulkanPipeline position_bicubic_;
     VulkanPipeline add_position_;
