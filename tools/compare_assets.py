@@ -74,6 +74,33 @@ CONFIGS = {
 }
 
 
+def load_reference_state(checkpoint: Path) -> dict[str, torch.Tensor]:
+    try:
+        return torch.load(
+            checkpoint, map_location="cpu", weights_only=True
+        )
+    except RuntimeError as error:
+        if "TorchScript archives" not in str(error):
+            raise
+    scripted = torch.jit.load(str(checkpoint), map_location="cpu")
+    state = {}
+    encoder_prefixes = (
+        "cls_token",
+        "patch_embed.",
+        "blocks.",
+        "norm.",
+    )
+    for name, value in scripted.state_dict().items():
+        if name == "base_pos_embed":
+            mapped = "pretrained.pos_embed"
+        elif name.startswith(encoder_prefixes):
+            mapped = "pretrained." + name
+        else:
+            mapped = name
+        state[mapped] = value
+    return state
+
+
 class CreateOptions(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -153,8 +180,13 @@ def main() -> None:
     config = CONFIGS[args.encoder]
     start = time.perf_counter()
     model = DepthAnythingV2(**config["model"])
-    state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    model.load_state_dict(state)
+    state = load_reference_state(args.checkpoint)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected or missing not in ([], ["pretrained.mask_token"]):
+        raise RuntimeError(
+            f"checkpoint mismatch: missing={missing}, "
+            f"unexpected={unexpected}"
+        )
     model.eval().to(args.reference_device)
     python_create_seconds = time.perf_counter() - start
 
