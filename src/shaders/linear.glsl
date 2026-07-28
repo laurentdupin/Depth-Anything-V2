@@ -21,12 +21,17 @@ layout(push_constant) uniform Parameters {
     uint output_columns;
 } parameters;
 
+shared float input_tile[32 * 16];
+shared float weight_tile[32 * 16];
+
 void main() {
-    const uint column_base = gl_GlobalInvocationID.x * 4;
-    const uint row_base = gl_GlobalInvocationID.y * 4;
+    const uint column_base =
+        gl_WorkGroupID.x * 32 + gl_LocalInvocationID.x * 4;
+    const uint row_base =
+        gl_WorkGroupID.y * 32 + gl_LocalInvocationID.y * 4;
     if (column_base >= parameters.output_columns ||
         row_base >= parameters.rows) {
-        return;
+        // The invocation must still participate in workgroup barriers.
     }
     float sums[4][4];
     for (uint row = 0; row < 4; ++row) {
@@ -34,30 +39,58 @@ void main() {
             sums[row][column] = 0.0;
         }
     }
-    for (uint inner = 0; inner < parameters.input_columns; ++inner) {
-        float input_values[4];
-        float weight_values[4];
-        for (uint row = 0; row < 4; ++row) {
-            const uint output_row = row_base + row;
-            input_values[row] = output_row < parameters.rows
+    const uint lane =
+        gl_LocalInvocationID.y * gl_WorkGroupSize.x +
+        gl_LocalInvocationID.x;
+    for (uint inner_base = 0;
+         inner_base < parameters.input_columns;
+         inner_base += 16) {
+        for (uint index = lane; index < 32 * 16; index += 64) {
+            const uint tile_row = index / 16;
+            const uint inner = inner_base + index % 16;
+            const uint output_row =
+                gl_WorkGroupID.y * 32 + tile_row;
+            input_tile[index] =
+                output_row < parameters.rows &&
+                    inner < parameters.input_columns
                 ? input_buffer.data[
                       output_row * parameters.input_columns + inner]
                 : 0.0;
         }
-        for (uint column = 0; column < 4; ++column) {
-            const uint output_column = column_base + column;
-            weight_values[column] =
+        for (uint index = lane; index < 32 * 16; index += 64) {
+            const uint tile_column = index / 16;
+            const uint inner = inner_base + index % 16;
+            const uint output_column =
+                gl_WorkGroupID.x * 32 + tile_column;
+            weight_tile[index] =
                 output_column < parameters.output_columns
+                    && inner < parameters.input_columns
                 ? weight_buffer.data[
                       output_column * parameters.input_columns + inner]
                 : 0.0;
         }
-        for (uint row = 0; row < 4; ++row) {
+        barrier();
+        const uint inner_count =
+            min(16, parameters.input_columns - inner_base);
+        for (uint inner = 0; inner < inner_count; ++inner) {
+            float input_values[4];
+            float weight_values[4];
+            for (uint row = 0; row < 4; ++row) {
+                input_values[row] = input_tile[
+                    (gl_LocalInvocationID.y * 4 + row) * 16 + inner];
+            }
             for (uint column = 0; column < 4; ++column) {
-                sums[row][column] +=
-                    input_values[row] * weight_values[column];
+                weight_values[column] = weight_tile[
+                    (gl_LocalInvocationID.x * 4 + column) * 16 + inner];
+            }
+            for (uint row = 0; row < 4; ++row) {
+                for (uint column = 0; column < 4; ++column) {
+                    sums[row][column] +=
+                        input_values[row] * weight_values[column];
+                }
             }
         }
+        barrier();
     }
     for (uint row = 0; row < 4; ++row) {
         const uint output_row = row_base + row;
