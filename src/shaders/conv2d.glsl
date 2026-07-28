@@ -31,13 +31,13 @@ layout(push_constant) uniform Parameters {
 void main() {
     const uint output_x = gl_GlobalInvocationID.x;
     const uint output_y = gl_GlobalInvocationID.y;
-    const uint output_channel = gl_GlobalInvocationID.z;
+    const uint output_channel_base = gl_GlobalInvocationID.z * 4;
     if (output_x >= parameters.output_width ||
         output_y >= parameters.output_height ||
-        output_channel >= parameters.output_channels) {
+        output_channel_base >= parameters.output_channels) {
         return;
     }
-    float sum = 0.0;
+    float sums[4] = {0.0, 0.0, 0.0, 0.0};
     for (uint input_channel = 0;
          input_channel < parameters.input_channels;
          ++input_channel) {
@@ -63,23 +63,41 @@ void main() {
                         uint(input_y)) *
                         parameters.input_width +
                     uint(input_x);
-                const uint weight_index =
-                    ((output_channel * parameters.input_channels +
-                        input_channel) *
-                        parameters.kernel +
-                        kernel_y) *
-                        parameters.kernel +
-                    kernel_x;
-                sum += input_buffer.data[input_index] *
-                    weight_buffer.data[weight_index];
+                const float input_value =
+                    input_buffer.data[input_index];
+                for (uint output_offset = 0;
+                     output_offset < 4;
+                     ++output_offset) {
+                    const uint output_channel =
+                        output_channel_base + output_offset;
+                    if (output_channel < parameters.output_channels) {
+                        const uint weight_index =
+                            ((output_channel *
+                                parameters.input_channels +
+                                input_channel) *
+                                parameters.kernel +
+                                kernel_y) *
+                                parameters.kernel +
+                            kernel_x;
+                        sums[output_offset] += input_value *
+                            weight_buffer.data[weight_index];
+                    }
+                }
             }
         }
     }
-    if (parameters.has_bias != 0) {
-        sum += bias_buffer.data[output_channel];
+    for (uint output_offset = 0; output_offset < 4; ++output_offset) {
+        const uint output_channel =
+            output_channel_base + output_offset;
+        if (output_channel < parameters.output_channels) {
+            float sum = sums[output_offset];
+            if (parameters.has_bias != 0) {
+                sum += bias_buffer.data[output_channel];
+            }
+            output_buffer.data[
+                (output_channel * parameters.output_height + output_y) *
+                    parameters.output_width +
+                output_x] = sum;
+        }
     }
-    output_buffer.data[
-        (output_channel * parameters.output_height + output_y) *
-            parameters.output_width +
-        output_x] = sum;
 }

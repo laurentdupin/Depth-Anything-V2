@@ -498,7 +498,7 @@ void VulkanOperators::conv2d(
         sizeof(parameters),
         divide_up(output_width, 8),
         divide_up(output_height, 8),
-        output_channels);
+        divide_up(output_channels, 4));
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(
