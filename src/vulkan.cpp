@@ -74,7 +74,7 @@ VulkanContext::VulkanContext(std::uint32_t device_index) {
         1,
         "DAV2",
         1,
-        VK_API_VERSION_1_1,
+        VK_API_VERSION_1_3,
     };
     const VkInstanceCreateInfo instance_info{
         VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,

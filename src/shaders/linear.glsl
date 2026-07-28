@@ -1,6 +1,6 @@
 #version 450 core
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
     float data[];
@@ -21,49 +21,56 @@ layout(push_constant) uniform Parameters {
     uint output_columns;
 } parameters;
 
-shared float input_tile[16][16];
-shared float weight_tile[16][16];
-
 void main() {
-    const uint output_column = gl_GlobalInvocationID.x;
-    const uint output_row = gl_GlobalInvocationID.y;
-    const uint local_column = gl_LocalInvocationID.x;
-    const uint local_row = gl_LocalInvocationID.y;
-    const bool valid_output =
-        output_column < parameters.output_columns &&
-        output_row < parameters.rows;
-    float sum = 0.0;
-
-    for (uint base = 0; base < parameters.input_columns; base += 16) {
-        const uint input_column = base + local_column;
-        input_tile[local_row][local_column] =
-            output_row < parameters.rows &&
-                    input_column < parameters.input_columns
+    const uint column_base = gl_GlobalInvocationID.x * 4;
+    const uint row_base = gl_GlobalInvocationID.y * 4;
+    if (column_base >= parameters.output_columns ||
+        row_base >= parameters.rows) {
+        return;
+    }
+    float sums[4][4];
+    for (uint row = 0; row < 4; ++row) {
+        for (uint column = 0; column < 4; ++column) {
+            sums[row][column] = 0.0;
+        }
+    }
+    for (uint inner = 0; inner < parameters.input_columns; ++inner) {
+        float input_values[4];
+        float weight_values[4];
+        for (uint row = 0; row < 4; ++row) {
+            const uint output_row = row_base + row;
+            input_values[row] = output_row < parameters.rows
                 ? input_buffer.data[
-                      output_row * parameters.input_columns + input_column]
+                      output_row * parameters.input_columns + inner]
                 : 0.0;
-
-        const uint weight_row = base + local_row;
-        weight_tile[local_row][local_column] =
-            weight_row < parameters.input_columns &&
-                    output_column < parameters.output_columns
+        }
+        for (uint column = 0; column < 4; ++column) {
+            const uint output_column = column_base + column;
+            weight_values[column] =
+                output_column < parameters.output_columns
                 ? weight_buffer.data[
-                      output_column * parameters.input_columns + weight_row]
+                      output_column * parameters.input_columns + inner]
                 : 0.0;
-        barrier();
-
-        if (valid_output) {
-            for (uint index = 0; index < 16; ++index) {
-                sum += input_tile[local_row][index] *
-                    weight_tile[index][local_column];
+        }
+        for (uint row = 0; row < 4; ++row) {
+            for (uint column = 0; column < 4; ++column) {
+                sums[row][column] +=
+                    input_values[row] * weight_values[column];
             }
         }
-        barrier();
     }
-
-    if (valid_output) {
-        output_buffer.data[
-            output_row * parameters.output_columns + output_column] =
-            sum + bias_buffer.data[output_column];
+    for (uint row = 0; row < 4; ++row) {
+        const uint output_row = row_base + row;
+        if (output_row >= parameters.rows) {
+            continue;
+        }
+        for (uint column = 0; column < 4; ++column) {
+            const uint output_column = column_base + column;
+            if (output_column < parameters.output_columns) {
+                output_buffer.data[
+                    output_row * parameters.output_columns + output_column] =
+                    sums[row][column] + bias_buffer.data[output_column];
+            }
+        }
     }
 }

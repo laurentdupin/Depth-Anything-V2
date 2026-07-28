@@ -1,13 +1,16 @@
 #include "operators.h"
 
 #include "add_scaled_spv.h"
+#include "add_spv.h"
+#include "bmm_spv.h"
+#include "gelu_spv.h"
 #include "layer_norm_spv.h"
-#include "linear_gelu_spv.h"
 #include "linear_spv.h"
 #include "merge_heads_spv.h"
 #include "prepare_tokens_spv.h"
+#include "position_bicubic_spv.h"
 #include "split_qkv_spv.h"
-#include "attention_head64_spv.h"
+#include "softmax_lastdim_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -37,26 +40,35 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     : context_(context),
       linear_(context.create_pipeline(
           dav2_linear_spv, dav2_linear_spv_size, 4, 12)),
-      linear_gelu_(context.create_pipeline(
-          dav2_linear_gelu_spv, dav2_linear_gelu_spv_size, 4, 12)),
+      gelu_(context.create_pipeline(
+          dav2_gelu_spv, dav2_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
           dav2_layer_norm_spv, dav2_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
-          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
+          dav2_add_scaled_spv, dav2_add_scaled_spv_size, 3, 8)),
       split_qkv_(context.create_pipeline(
           dav2_split_qkv_spv, dav2_split_qkv_spv_size, 4, 16)),
-      attention_head64_(context.create_pipeline(
-          dav2_attention_head64_spv,
-          dav2_attention_head64_spv_size,
-          4,
+      bmm_(context.create_pipeline(
+          dav2_bmm_spv, dav2_bmm_spv_size, 3, 20)),
+      softmax_lastdim_(context.create_pipeline(
+          dav2_softmax_lastdim_spv,
+          dav2_softmax_lastdim_spv_size,
+          2,
           8)),
       merge_heads_(context.create_pipeline(
           dav2_merge_heads_spv, dav2_merge_heads_spv_size, 2, 8)),
       prepare_tokens_(context.create_pipeline(
           dav2_prepare_tokens_spv,
           dav2_prepare_tokens_spv_size,
-          6,
-          20)) {}
+          5,
+          20)),
+      position_bicubic_(context.create_pipeline(
+          dav2_position_bicubic_spv,
+          dav2_position_bicubic_spv_size,
+          2,
+          20)),
+      add_(context.create_pipeline(
+          dav2_add_spv, dav2_add_spv_size, 3, 4)) {}
 
 void VulkanOperators::linear(
     VulkanBuffer& output,
@@ -84,12 +96,23 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        gelu ? linear_gelu_ : linear_,
+        linear_,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(output_columns, 16),
-        divide_up(rows, 16));
+        divide_up(divide_up(output_columns, 4), 8),
+        divide_up(divide_up(rows, 4), 8));
+    if (gelu) {
+        struct GeluParameters {
+            std::uint32_t count;
+        } gelu_parameters{rows * output_columns};
+        context_.dispatch(
+            gelu_,
+            {&output, &output},
+            &gelu_parameters,
+            sizeof(gelu_parameters),
+            divide_up(gelu_parameters.count, 256));
+    }
 }
 
 void VulkanOperators::layer_norm(
@@ -140,9 +163,18 @@ void VulkanOperators::add_scaled(
     } parameters{count, columns};
     context_.dispatch(
         add_scaled_,
-        {&output, &residual, &addend, &scale},
+        {&output, &addend, &scale},
         &parameters,
         sizeof(parameters),
+        divide_up(count, 256));
+    struct AddParameters {
+        std::uint32_t count;
+    } add_parameters{count};
+    context_.dispatch(
+        add_,
+        {&output, &residual, &output},
+        &add_parameters,
+        sizeof(add_parameters),
         divide_up(count, 256));
 }
 
@@ -194,17 +226,45 @@ void VulkanOperators::attention_head64(
     require_bytes(query, elements, "query");
     require_bytes(key, elements, "key");
     require_bytes(value, elements, "value");
-    struct Parameters {
-        std::uint32_t tokens;
-        std::uint32_t heads;
-    } parameters{tokens, heads};
+    const std::uint64_t score_elements =
+        std::uint64_t(heads) * tokens * tokens;
+    VulkanBuffer scores =
+        context_.create_device_buffer(score_elements * sizeof(float));
+    VulkanBuffer probabilities =
+        context_.create_device_buffer(score_elements * sizeof(float));
+    struct BmmParameters {
+        std::uint32_t rows;
+        std::uint32_t columns;
+        std::uint32_t inner;
+        std::uint32_t batches;
+        std::uint32_t weight_transposed;
+    } score_parameters{tokens, tokens, 64, heads, 1};
     context_.dispatch(
-        attention_head64_,
-        {&output, &query, &key, &value},
-        &parameters,
-        sizeof(parameters),
-        1,
-        divide_up(tokens, 4),
+        bmm_,
+        {&scores, &query, &key},
+        &score_parameters,
+        sizeof(score_parameters),
+        divide_up(divide_up(tokens, 4), 8),
+        divide_up(divide_up(tokens, 8), 8),
+        heads);
+    struct SoftmaxParameters {
+        std::uint32_t rows;
+        std::uint32_t columns;
+    } softmax_parameters{heads * tokens, tokens};
+    context_.dispatch(
+        softmax_lastdim_,
+        {&probabilities, &scores},
+        &softmax_parameters,
+        sizeof(softmax_parameters),
+        softmax_parameters.rows);
+    BmmParameters value_parameters{tokens, 64, tokens, heads, 0};
+    context_.dispatch(
+        bmm_,
+        {&output, &probabilities, &value},
+        &value_parameters,
+        sizeof(value_parameters),
+        divide_up(divide_up(64, 4), 8),
+        divide_up(divide_up(tokens, 8), 8),
         heads);
 }
 
@@ -276,6 +336,8 @@ void VulkanOperators::prepare_tokens(
         patch_height,
         embedding,
     };
+    VulkanBuffer interpolated =
+        context_.create_device_buffer(tokens * embedding * sizeof(float));
     context_.dispatch(
         prepare_tokens_,
         {
@@ -284,12 +346,45 @@ void VulkanOperators::prepare_tokens(
             &patch_weight,
             &patch_bias,
             &class_token,
-            &position,
         },
         &parameters,
         sizeof(parameters),
         divide_up(embedding, 8),
         divide_up(static_cast<std::uint32_t>(tokens), 8));
+    struct PositionParameters {
+        std::uint32_t patch_width;
+        std::uint32_t patch_height;
+        std::uint32_t embedding;
+        float scale_x;
+        float scale_y;
+    } position_parameters{
+        patch_width,
+        patch_height,
+        embedding,
+        static_cast<float>(
+            1.0 /
+            ((static_cast<double>(patch_width) + 0.1) / 37.0)),
+        static_cast<float>(
+            1.0 /
+            ((static_cast<double>(patch_height) + 0.1) / 37.0)),
+    };
+    context_.dispatch(
+        position_bicubic_,
+        {&interpolated, &position},
+        &position_parameters,
+        sizeof(position_parameters),
+        divide_up(static_cast<std::uint32_t>(tokens * embedding), 256));
+    struct AddParameters {
+        std::uint32_t count;
+    } add_parameters{
+        static_cast<std::uint32_t>(tokens * embedding),
+    };
+    context_.dispatch(
+        add_,
+        {&output, &output, &interpolated},
+        &add_parameters,
+        sizeof(add_parameters),
+        divide_up(add_parameters.count, 256));
 }
 
 }  // namespace dav2

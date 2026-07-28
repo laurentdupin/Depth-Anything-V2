@@ -27,7 +27,8 @@ if(DAV2_WITH_VULKAN)
         set(HEADER "${DAV2_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
             OUTPUT "${SPIRV}"
-            COMMAND Vulkan::glslc -O -fshader-stage=compute
+            COMMAND Vulkan::glslc -fshader-stage=compute
+                --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
                 -o "${SPIRV}" "${SOURCE}"
             DEPENDS "${SOURCE}"
             VERBATIM
@@ -47,13 +48,16 @@ if(DAV2_WITH_VULKAN)
 
     dav2_compile_shader(elementwise)
     dav2_compile_shader(linear)
-    dav2_compile_shader(linear_gelu)
+    dav2_compile_shader(gelu)
     dav2_compile_shader(layer_norm)
     dav2_compile_shader(add_scaled)
     dav2_compile_shader(split_qkv)
-    dav2_compile_shader(attention_head64)
     dav2_compile_shader(merge_heads)
     dav2_compile_shader(prepare_tokens)
+    dav2_compile_shader(position_bicubic)
+    dav2_compile_shader(add)
+    dav2_compile_shader(bmm)
+    dav2_compile_shader(softmax_lastdim)
 endif()
 
 add_library(depth_anything_v2 SHARED
@@ -84,6 +88,7 @@ if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
         src/model.cpp
         src/gpu_model.cpp
+        src/encoder.cpp
         src/operators.cpp
         src/vulkan.cpp
         src/vulkan_executor.cpp
@@ -105,6 +110,25 @@ if(DAV2_BUILD_TOOLS)
     add_executable(dav2_run tools/dav2_run.c)
     target_link_libraries(dav2_run PRIVATE depth_anything_v2)
     install(TARGETS dav2_run RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+    if(DAV2_WITH_VULKAN)
+        add_executable(dav2_encoder_probe
+            tools/dav2_encoder_probe.cpp
+            src/encoder.cpp
+            src/gpu_model.cpp
+            src/model.cpp
+            src/operators.cpp
+            src/vulkan.cpp
+            ${DAV2_SHADER_HEADERS}
+        )
+        target_compile_features(dav2_encoder_probe PRIVATE cxx_std_17)
+        target_include_directories(dav2_encoder_probe PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${DAV2_GENERATED_DIR}"
+        )
+        target_link_libraries(dav2_encoder_probe PRIVATE Vulkan::Vulkan)
+    endif()
 endif()
 
 if(DAV2_BUILD_TESTS)

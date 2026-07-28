@@ -73,13 +73,16 @@ public:
 private:
     VulkanContext& context_;
     VulkanPipeline linear_;
-    VulkanPipeline linear_gelu_;
+    VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;
     VulkanPipeline split_qkv_;
-    VulkanPipeline attention_head64_;
+    VulkanPipeline bmm_;
+    VulkanPipeline softmax_lastdim_;
     VulkanPipeline merge_heads_;
     VulkanPipeline prepare_tokens_;
+    VulkanPipeline position_bicubic_;
+    VulkanPipeline add_;
 };
 
 }  // namespace dav2
