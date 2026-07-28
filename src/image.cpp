@@ -108,6 +108,7 @@ void preprocess_bgr8(
     int height,
     std::ptrdiff_t stride,
     ImageShape destination,
+    ImageScratch& scratch,
     std::vector<float>& rgb_chw) {
     if (source == nullptr || width <= 0 || height <= 0 ||
         stride < static_cast<std::ptrdiff_t>(width) * 3 ||
@@ -123,22 +124,23 @@ void preprocess_bgr8(
 
     const double scale_x = static_cast<double>(width) / destination.width;
     const double scale_y = static_cast<double>(height) / destination.height;
-    std::vector<int> x_indices(static_cast<std::size_t>(destination.width));
-    std::vector<float> x_coefficients(
+    scratch.x_indices.resize(static_cast<std::size_t>(destination.width));
+    scratch.x_coefficients.resize(
         static_cast<std::size_t>(destination.width) * 4);
     for (int dx = 0; dx < destination.width; ++dx) {
         const float coordinate =
             static_cast<float>((dx + 0.5) * scale_x - 0.5);
         const int index = static_cast<int>(std::floor(coordinate));
-        x_indices[dx] = index;
+        scratch.x_indices[dx] = index;
         cubic_coefficients(
             coordinate - index,
-            x_coefficients.data() + static_cast<std::size_t>(dx) * 4);
+            scratch.x_coefficients.data() +
+                static_cast<std::size_t>(dx) * 4);
     }
 
     // OpenCV performs cubic resize as a separable filter with double
     // intermediate rows and float coefficients for a CV_64F input.
-    std::vector<double> horizontal(
+    scratch.horizontal.resize(
         static_cast<std::size_t>(height) * destination.width * 3);
     parallel_rows(height, [&](int begin, int end) {
         for (int sy = begin; sy < end; ++sy) {
@@ -146,8 +148,9 @@ void preprocess_bgr8(
                 source + static_cast<std::ptrdiff_t>(sy) * stride;
             for (int dx = 0; dx < destination.width; ++dx) {
                 const float* alpha =
-                    x_coefficients.data() + static_cast<std::size_t>(dx) * 4;
-                const int base = x_indices[dx];
+                    scratch.x_coefficients.data() +
+                    static_cast<std::size_t>(dx) * 4;
+                const int base = scratch.x_indices[dx];
                 for (int channel = 0; channel < 3; ++channel) {
                     double value = 0.0;
                     for (int tap = 0; tap < 4; ++tap) {
@@ -159,7 +162,7 @@ void preprocess_bgr8(
                             static_cast<double>(pixel[bgr_channel]) / 255.0;
                         value += unit * alpha[tap];
                     }
-                    horizontal[
+                    scratch.horizontal[
                         (static_cast<std::size_t>(sy) *
                             destination.width + dx) *
                             3 +
@@ -183,7 +186,7 @@ void preprocess_bgr8(
                     const auto sample = [&](int tap) {
                         const int sy =
                             clamp_index(base - 1 + tap, height);
-                        return horizontal[
+                        return scratch.horizontal[
                             (static_cast<std::size_t>(sy) *
                                 destination.width + dx) *
                                 3 +
@@ -200,6 +203,24 @@ void preprocess_bgr8(
             }
         }
     });
+}
+
+void preprocess_bgr8(
+    const std::uint8_t* source,
+    int width,
+    int height,
+    std::ptrdiff_t stride,
+    ImageShape destination,
+    std::vector<float>& rgb_chw) {
+    ImageScratch scratch;
+    preprocess_bgr8(
+        source,
+        width,
+        height,
+        stride,
+        destination,
+        scratch,
+        rgb_chw);
 }
 
 }  // namespace dav2

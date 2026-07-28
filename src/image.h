@@ -11,7 +11,22 @@ struct ImageShape {
     int height;
 };
 
+struct ImageScratch {
+    std::vector<int> x_indices;
+    std::vector<float> x_coefficients;
+    std::vector<double> horizontal;
+};
+
 ImageShape network_shape(int width, int height, int input_size);
+
+void preprocess_bgr8(
+    const std::uint8_t* source,
+    int width,
+    int height,
+    std::ptrdiff_t stride,
+    ImageShape destination,
+    ImageScratch& scratch,
+    std::vector<float>& rgb_chw);
 
 void preprocess_bgr8(
     const std::uint8_t* source,

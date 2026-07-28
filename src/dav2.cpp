@@ -12,6 +12,8 @@
 
 struct dav2_context {
     std::unique_ptr<dav2::Executor> executor;
+    dav2::ImageScratch image_scratch;
+    std::vector<float> image_input;
 };
 
 namespace {
@@ -187,11 +189,16 @@ dav2_status DAV2_CALL dav2_infer_bgr8(
     return protect([&] {
         const dav2::ImageShape shape =
             dav2::network_shape(image_width, image_height, input_size);
-        std::vector<float> input;
         dav2::preprocess_bgr8(
-            bgr, image_width, image_height, row_stride_bytes, shape, input);
+            bgr,
+            image_width,
+            image_height,
+            row_stride_bytes,
+            shape,
+            context->image_scratch,
+            context->image_input);
         context->executor->infer_resized(
-            input.data(),
+            context->image_input.data(),
             shape.width,
             shape.height,
             output_depth,
