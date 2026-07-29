@@ -184,7 +184,10 @@ void VulkanPipeline::set_debug_name(const char* name) {
     debug_name_ = name != nullptr ? name : "";
 }
 
-VulkanContext::VulkanContext(std::uint32_t device_index) {
+VulkanContext::VulkanContext(
+    std::uint32_t device_index,
+    bool track_resource_hazards)
+    : track_resource_hazards_(track_resource_hazards) {
     try {
     const VkApplicationInfo application{
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -1776,7 +1779,27 @@ void VulkanContext::dispatch_resources(
             profile_query_pool_,
             0);
     }
-    if (batched) {
+    if (batched && batch_has_dispatch_ &&
+        !track_resource_hazards_) {
+        const VkMemoryBarrier barrier{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT |
+                VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        vkCmdPipelineBarrier(
+            command,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1,
+            &barrier,
+            0,
+            nullptr,
+            0,
+            nullptr);
+    } else if (batched) {
         std::unordered_map<VkBuffer, VkAccessFlags>
             current_buffers;
         std::unordered_map<VkImage, VkAccessFlags>

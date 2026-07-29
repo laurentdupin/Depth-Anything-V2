@@ -163,7 +163,9 @@ private:
 
 class VulkanContext {
 public:
-    explicit VulkanContext(std::uint32_t device_index);
+    explicit VulkanContext(
+        std::uint32_t device_index,
+        bool track_resource_hazards = true);
     VulkanContext(const VulkanContext&) = delete;
     VulkanContext& operator=(const VulkanContext&) = delete;
     ~VulkanContext();
@@ -382,6 +384,7 @@ private:
     std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
+    bool track_resource_hazards_ = true;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
     std::unordered_map<VkBuffer, VkAccessFlags>

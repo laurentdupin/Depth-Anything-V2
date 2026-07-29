@@ -485,7 +485,9 @@ public:
         dav2_encoder encoder,
         int vulkan_device_index)
         : model_(model_path, encoder),
-          context_(static_cast<std::uint32_t>(vulkan_device_index)),
+          context_(
+              static_cast<std::uint32_t>(vulkan_device_index),
+              encoder != DAV2_ENCODER_VITL),
           weights_(model_, context_),
           operators_(context_),
           preprocessor_(context_),
