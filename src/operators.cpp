@@ -178,7 +178,41 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           },
           16)),
       relu_(context.create_pipeline(
-          dav2_relu_spv, dav2_relu_spv_size, 2, 4)) {}
+          dav2_relu_spv, dav2_relu_spv_size, 2, 4)) {
+    linear_.set_debug_name("linear");
+    linear16_.set_debug_name("linear16");
+    linear_half_.set_debug_name("linear_half");
+    linear16_half_.set_debug_name("linear16_half");
+    gelu_.set_debug_name("gelu");
+    layer_norm_.set_debug_name("layer_norm");
+    add_scaled_.set_debug_name("add_scaled");
+    bmm_.set_debug_name("bmm");
+    bmm_score_half_.set_debug_name("bmm_score_half");
+    bmm_value_half_.set_debug_name("bmm_value_half");
+    softmax_lastdim_.set_debug_name("softmax_lastdim");
+    softmax_lastdim_half_.set_debug_name(
+        "softmax_lastdim_half");
+    prepare_tokens_.set_debug_name("prepare_tokens");
+    position_bicubic_.set_debug_name("position_bicubic");
+    add_position_.set_debug_name("add_position");
+    add_.set_debug_name("add");
+    project_tokens_.set_debug_name("project_tokens");
+    project_tokens_half_.set_debug_name(
+        "project_tokens_half");
+    conv2d_.set_debug_name("conv2d");
+    conv2d8_.set_debug_name("conv2d8");
+    conv2d_half_.set_debug_name("conv2d_half");
+    conv2d8_half_.set_debug_name("conv2d8_half");
+    conv_transpose_nonoverlap_.set_debug_name(
+        "conv_transpose_nonoverlap");
+    conv_transpose_nonoverlap_half_.set_debug_name(
+        "conv_transpose_nonoverlap_half");
+    bilinear_align_true_.set_debug_name(
+        "bilinear_align_true");
+    bilinear_align_true_image_.set_debug_name(
+        "bilinear_align_true_image");
+    relu_.set_debug_name("relu");
+}
 
 void VulkanOperators::linear(
     VulkanBuffer& output,

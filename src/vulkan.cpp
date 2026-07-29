@@ -1,6 +1,8 @@
 #include "vulkan.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -166,6 +168,7 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
         pipeline_ = std::exchange(other.pipeline_, VK_NULL_HANDLE);
         descriptor_types_ = std::move(other.descriptor_types_);
         descriptor_access_ = std::move(other.descriptor_access_);
+        debug_name_ = std::move(other.debug_name_);
         cached_descriptor_sets_ =
             std::move(other.cached_descriptor_sets_);
         push_constant_bytes_ = std::exchange(other.push_constant_bytes_, 0);
@@ -175,6 +178,10 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
 
 VulkanPipeline::~VulkanPipeline() {
     if (owner_) owner_->destroy(*this);
+}
+
+void VulkanPipeline::set_debug_name(const char* name) {
+    debug_name_ = name != nullptr ? name : "";
 }
 
 VulkanContext::VulkanContext(std::uint32_t device_index) {
@@ -362,6 +369,14 @@ VulkanContext::VulkanContext(std::uint32_t device_index) {
     }
     queue_family_ = static_cast<std::uint32_t>(
         std::distance(families.begin(), family));
+    const char* profile_environment =
+        std::getenv("DAV2_VULKAN_PROFILE");
+    profile_dispatches_ =
+        profile_environment != nullptr &&
+        profile_environment[0] != '\0' &&
+        profile_environment[0] != '0' &&
+        family->timestampValidBits != 0;
+    timestamp_period_ns_ = properties.limits.timestampPeriod;
 
     constexpr float priority = 1.0f;
     const VkDeviceQueueCreateInfo queue_info{
@@ -436,6 +451,23 @@ VulkanContext::VulkanContext(std::uint32_t device_index) {
         vkCreateDescriptorPool(
             device_, &descriptor_pool_info, nullptr, &descriptor_pool_),
         "vkCreateDescriptorPool");
+    if (profile_dispatches_) {
+        const VkQueryPoolCreateInfo query_pool_info{
+            VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            nullptr,
+            0,
+            VK_QUERY_TYPE_TIMESTAMP,
+            2,
+            0,
+        };
+        check(
+            vkCreateQueryPool(
+                device_,
+                &query_pool_info,
+                nullptr,
+                &profile_query_pool_),
+            "vkCreateQueryPool");
+    }
     } catch (...) {
         release();
         throw;
@@ -449,6 +481,7 @@ VulkanContext::~VulkanContext() {
 void VulkanContext::release() noexcept {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        print_profile();
         cancel_batch();
         for (VulkanDeferredBuffer& buffer : device_buffer_pool_) {
             buffer.cacheable = false;
@@ -465,17 +498,70 @@ void VulkanContext::release() noexcept {
         if (descriptor_pool_) {
             vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         }
+        if (profile_query_pool_) {
+            vkDestroyQueryPool(
+                device_, profile_query_pool_, nullptr);
+        }
         if (command_pool_) {
             vkDestroyCommandPool(device_, command_pool_, nullptr);
         }
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
         descriptor_pool_ = VK_NULL_HANDLE;
+        profile_query_pool_ = VK_NULL_HANDLE;
         command_pool_ = VK_NULL_HANDLE;
     }
     if (instance_) {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanContext::record_profile(
+    const VulkanPipeline& pipeline,
+    std::uint64_t ticks) {
+    const std::string& name = pipeline.debug_name_.empty()
+        ? std::string("unnamed")
+        : pipeline.debug_name_;
+    ProfileStat& stat = profile_stats_[name];
+    stat.total_ticks += ticks;
+    stat.maximum_ticks = std::max(stat.maximum_ticks, ticks);
+    ++stat.dispatches;
+}
+
+void VulkanContext::print_profile() const noexcept {
+    if (!profile_dispatches_ || profile_stats_.empty()) return;
+    std::vector<std::pair<std::string, ProfileStat>> sorted(
+        profile_stats_.begin(), profile_stats_.end());
+    std::sort(
+        sorted.begin(),
+        sorted.end(),
+        [](const auto& left, const auto& right) {
+            return left.second.total_ticks >
+                right.second.total_ticks;
+        });
+    std::fprintf(
+        stderr,
+        "DAV2 Vulkan profile: %s (GPU timestamps)\n",
+        device_name_.c_str());
+    for (const auto& [name, stat] : sorted) {
+        const double total_ms =
+            static_cast<double>(stat.total_ticks) *
+            timestamp_period_ns_ / 1.0e6;
+        const double average_ms =
+            total_ms / static_cast<double>(stat.dispatches);
+        const double maximum_ms =
+            static_cast<double>(stat.maximum_ticks) *
+            timestamp_period_ns_ / 1.0e6;
+        std::fprintf(
+            stderr,
+            "  %-34s total=%10.3f ms count=%6llu "
+            "avg=%8.4f ms max=%8.4f ms\n",
+            name.c_str(),
+            total_ms,
+            static_cast<unsigned long long>(stat.dispatches),
+            average_ms,
+            maximum_ms);
     }
 }
 
@@ -1679,6 +1765,17 @@ void VulkanContext::dispatch_resources(
     }
     VkCommandBuffer command =
         batched ? batch_command_ : begin_commands();
+    const bool profile =
+        !batched && profile_query_pool_ != VK_NULL_HANDLE;
+    if (profile) {
+        vkCmdResetQueryPool(
+            command, profile_query_pool_, 0, 2);
+        vkCmdWriteTimestamp(
+            command,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            profile_query_pool_,
+            0);
+    }
     if (batched) {
         std::unordered_map<VkBuffer, VkAccessFlags>
             current_buffers;
@@ -1801,12 +1898,36 @@ void VulkanContext::dispatch_resources(
             push_constants);
     }
     vkCmdDispatch(command, group_x, group_y, group_z);
+    if (profile) {
+        vkCmdWriteTimestamp(
+            command,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            profile_query_pool_,
+            1);
+    }
     if (batched) {
         batch_has_dispatch_ = true;
         batch_descriptor_sets_.push_back(
             {const_cast<VulkanPipeline*>(&pipeline), descriptor_set});
     } else {
         end_commands(command, wait);
+        if (profile) {
+            std::uint64_t timestamps[2]{};
+            check(
+                vkGetQueryPoolResults(
+                    device_,
+                    profile_query_pool_,
+                    0,
+                    2,
+                    sizeof(timestamps),
+                    timestamps,
+                    sizeof(std::uint64_t),
+                    VK_QUERY_RESULT_64_BIT |
+                        VK_QUERY_RESULT_WAIT_BIT),
+                "vkGetQueryPoolResults");
+            record_profile(
+                pipeline, timestamps[1] - timestamps[0]);
+        }
         pipeline.cached_descriptor_sets_.push_back(descriptor_set);
     }
 }

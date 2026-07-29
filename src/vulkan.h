@@ -146,6 +146,7 @@ public:
     VulkanPipeline(const VulkanPipeline&) = delete;
     VulkanPipeline& operator=(const VulkanPipeline&) = delete;
     ~VulkanPipeline();
+    void set_debug_name(const char* name);
 
 private:
     friend class VulkanContext;
@@ -157,6 +158,7 @@ private:
     std::vector<VkAccessFlags> descriptor_access_;
     mutable std::vector<VkDescriptorSet> cached_descriptor_sets_;
     std::uint32_t push_constant_bytes_ = 0;
+    std::string debug_name_;
 };
 
 class VulkanContext {
@@ -265,6 +267,10 @@ public:
 
     template <typename Function>
     void batch(Function&& function) {
+        if (profile_dispatches_) {
+            std::forward<Function>(function)();
+            return;
+        }
         if (batch_command_ != VK_NULL_HANDLE) {
             std::forward<Function>(function)();
             return;
@@ -350,6 +356,16 @@ private:
     void release_submission_resources(
         VulkanSubmission& submission) noexcept;
     void release() noexcept;
+    void record_profile(
+        const VulkanPipeline& pipeline,
+        std::uint64_t ticks);
+    void print_profile() const noexcept;
+
+    struct ProfileStat {
+        std::uint64_t total_ticks = 0;
+        std::uint64_t maximum_ticks = 0;
+        std::uint64_t dispatches = 0;
+    };
     static void check(VkResult result, const char* operation);
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -360,6 +376,10 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    VkQueryPool profile_query_pool_ = VK_NULL_HANDLE;
+    bool profile_dispatches_ = false;
+    float timestamp_period_ns_ = 0.0f;
+    std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;

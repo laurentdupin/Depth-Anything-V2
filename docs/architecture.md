@@ -94,6 +94,13 @@ On Windows the C/C++ runtime is linked statically. The only non-system API
 loaded by the resulting DLL is `vulkan-1.dll`, supplied by the installed GPU
 driver.
 
+For development profiling, setting `DAV2_VULKAN_PROFILE=1` disables command
+batching and measures every compute dispatch with a reusable Vulkan timestamp
+query pool. When the context is destroyed, the runtime prints total, average,
+maximum, and dispatch count grouped by embedded kernel name. The query pool and
+per-dispatch synchronization do not exist on the normal execution path when
+the variable is unset.
+
 ## Model files
 
 The development-only `tools/export_model.py` converts the official state

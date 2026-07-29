@@ -33,7 +33,10 @@ GpuPreprocessor::GpuPreprocessor(VulkanContext& context)
               VK_ACCESS_SHADER_READ_BIT,
               VK_ACCESS_SHADER_WRITE_BIT,
           },
-          4 * sizeof(std::uint32_t))) {}
+          4 * sizeof(std::uint32_t))) {
+    pipeline_.set_debug_name("preprocess_rgba");
+    texture_pipeline_.set_debug_name("preprocess_texture");
+}
 
 void GpuPreprocessor::run(
     VulkanBuffer& destination,
