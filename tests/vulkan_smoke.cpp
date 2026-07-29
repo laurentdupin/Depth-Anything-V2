@@ -44,7 +44,14 @@ int main() {
     auto pipeline = context.create_pipeline(
         dav2_elementwise_spv,
         dav2_elementwise_spv_size,
-        2,
+        {
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        },
+        {
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        },
         16);
     struct Parameters {
         std::uint32_t count;

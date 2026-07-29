@@ -165,6 +165,7 @@ VulkanPipeline& VulkanPipeline::operator=(VulkanPipeline&& other) noexcept {
         layout_ = std::exchange(other.layout_, VK_NULL_HANDLE);
         pipeline_ = std::exchange(other.pipeline_, VK_NULL_HANDLE);
         descriptor_types_ = std::move(other.descriptor_types_);
+        descriptor_access_ = std::move(other.descriptor_access_);
         cached_descriptor_sets_ =
             std::move(other.cached_descriptor_sets_);
         push_constant_bytes_ = std::exchange(other.push_constant_bytes_, 0);
@@ -1067,6 +1068,9 @@ void VulkanContext::begin_batch() {
     }
     batch_command_ = begin_commands();
     batch_has_dispatch_ = false;
+    batch_buffer_access_.clear();
+    batch_image_access_.clear();
+    batch_image_layout_.clear();
 }
 
 void VulkanContext::release_batch_resources() noexcept {
@@ -1082,6 +1086,9 @@ void VulkanContext::release_batch_resources() noexcept {
         recycle_or_destroy(buffer);
     }
     batch_deferred_buffers_.clear();
+    batch_buffer_access_.clear();
+    batch_image_access_.clear();
+    batch_image_layout_.clear();
 }
 
 VulkanSubmission VulkanContext::end_batch_async(
@@ -1342,11 +1349,17 @@ VulkanPipeline VulkanContext::create_pipeline(
     std::size_t spirv_bytes,
     std::uint32_t binding_count,
     std::uint32_t push_constant_bytes) {
+    std::vector<VkAccessFlags> access(
+        binding_count, VK_ACCESS_SHADER_READ_BIT);
+    if (!access.empty()) {
+        access[0] = VK_ACCESS_SHADER_WRITE_BIT;
+    }
     return create_pipeline(
         spirv,
         spirv_bytes,
         std::vector<VkDescriptorType>(
             binding_count, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        access,
         push_constant_bytes);
 }
 
@@ -1355,8 +1368,37 @@ VulkanPipeline VulkanContext::create_pipeline(
     std::size_t spirv_bytes,
     const std::vector<VkDescriptorType>& descriptor_types,
     std::uint32_t push_constant_bytes) {
+    std::vector<VkAccessFlags> access(
+        descriptor_types.size(), VK_ACCESS_SHADER_READ_BIT);
+    if (!access.empty()) {
+        access[0] = VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    return create_pipeline(
+        spirv,
+        spirv_bytes,
+        descriptor_types,
+        access,
+        push_constant_bytes);
+}
+
+VulkanPipeline VulkanContext::create_pipeline(
+    const std::uint32_t* spirv,
+    std::size_t spirv_bytes,
+    const std::vector<VkDescriptorType>& descriptor_types,
+    const std::vector<VkAccessFlags>& descriptor_access,
+    std::uint32_t push_constant_bytes) {
     if (spirv == nullptr || spirv_bytes == 0 || spirv_bytes % 4 != 0 ||
         descriptor_types.empty() ||
+        descriptor_access.size() != descriptor_types.size() ||
+        std::any_of(
+            descriptor_access.begin(),
+            descriptor_access.end(),
+            [](VkAccessFlags access) {
+                constexpr VkAccessFlags allowed =
+                    VK_ACCESS_SHADER_READ_BIT |
+                    VK_ACCESS_SHADER_WRITE_BIT;
+                return access == 0 || (access & ~allowed) != 0;
+            }) ||
         push_constant_bytes > 128 ||
         push_constant_bytes % 4 != 0) {
         throw std::invalid_argument("invalid compute pipeline description");
@@ -1364,6 +1406,7 @@ VulkanPipeline VulkanContext::create_pipeline(
     VulkanPipeline result;
     result.owner_ = this;
     result.descriptor_types_ = descriptor_types;
+    result.descriptor_access_ = descriptor_access;
     result.push_constant_bytes_ = push_constant_bytes;
 
     std::vector<VkDescriptorSetLayoutBinding> bindings(
@@ -1636,24 +1679,106 @@ void VulkanContext::dispatch_resources(
     }
     VkCommandBuffer command =
         batched ? batch_command_ : begin_commands();
-    if (batched && batch_has_dispatch_) {
-        const VkMemoryBarrier barrier{
-            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            nullptr,
-            VK_ACCESS_SHADER_WRITE_BIT,
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        };
-        vkCmdPipelineBarrier(
-            command,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0,
-            1,
-            &barrier,
-            0,
-            nullptr,
-            0,
-            nullptr);
+    if (batched) {
+        std::unordered_map<VkBuffer, VkAccessFlags>
+            current_buffers;
+        std::unordered_map<VkImage, VkAccessFlags>
+            current_images;
+        std::unordered_map<VkImage, VkImageLayout> image_layouts;
+        for (std::size_t index = 0;
+             index < resources.size();
+             ++index) {
+            const VkAccessFlags access =
+                pipeline.descriptor_access_[index];
+            if (resources[index].buffer != nullptr) {
+                current_buffers[
+                    resources[index].buffer->buffer_] |= access;
+            } else {
+                const VkImage image =
+                    resources[index].image->image_;
+                current_images[image] |= access;
+                image_layouts[image] =
+                    pipeline.descriptor_types_[index] ==
+                            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                    ? VK_IMAGE_LAYOUT_GENERAL
+                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+        }
+        std::vector<VkBufferMemoryBarrier> buffer_barriers;
+        std::vector<VkImageMemoryBarrier> image_barriers;
+        for (const auto& [buffer, access] : current_buffers) {
+            const auto previous =
+                batch_buffer_access_.find(buffer);
+            if (previous != batch_buffer_access_.end() &&
+                ((previous->second | access) &
+                 VK_ACCESS_SHADER_WRITE_BIT) != 0) {
+                buffer_barriers.push_back(
+                    {
+                        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        nullptr,
+                        previous->second,
+                        access,
+                        VK_QUEUE_FAMILY_IGNORED,
+                        VK_QUEUE_FAMILY_IGNORED,
+                        buffer,
+                        0,
+                        VK_WHOLE_SIZE,
+                    });
+            }
+            batch_buffer_access_[buffer] = access;
+        }
+        for (const auto& [image, access] : current_images) {
+            const auto previous =
+                batch_image_access_.find(image);
+            const VkImageLayout layout = image_layouts[image];
+            if (previous != batch_image_access_.end()) {
+                const VkImageLayout previous_layout =
+                    batch_image_layout_.at(image);
+                if (((previous->second | access) &
+                     VK_ACCESS_SHADER_WRITE_BIT) == 0 &&
+                    previous_layout == layout) {
+                    batch_image_access_[image] = access;
+                    continue;
+                }
+                image_barriers.push_back(
+                    {
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        nullptr,
+                        previous->second,
+                        access,
+                        previous_layout,
+                        layout,
+                        VK_QUEUE_FAMILY_IGNORED,
+                        VK_QUEUE_FAMILY_IGNORED,
+                        image,
+                        {
+                            VK_IMAGE_ASPECT_COLOR_BIT,
+                            0,
+                            1,
+                            0,
+                            1,
+                        },
+                    });
+            }
+            batch_image_access_[image] = access;
+            batch_image_layout_[image] = layout;
+        }
+        if (!buffer_barriers.empty() ||
+            !image_barriers.empty()) {
+            vkCmdPipelineBarrier(
+                command,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0,
+                nullptr,
+                static_cast<std::uint32_t>(
+                    buffer_barriers.size()),
+                buffer_barriers.data(),
+                static_cast<std::uint32_t>(
+                    image_barriers.size()),
+                image_barriers.data());
+        }
     }
     vkCmdBindPipeline(
         command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline_);

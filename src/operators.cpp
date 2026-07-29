@@ -104,7 +104,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       softmax_lastdim_half_(context.create_pipeline(
           dav2_softmax_lastdim_half_spv,
           dav2_softmax_lastdim_half_spv_size,
-          1,
+          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+          {
+              VK_ACCESS_SHADER_READ_BIT |
+              VK_ACCESS_SHADER_WRITE_BIT,
+          },
           8)),
       prepare_tokens_(context.create_pipeline(
           dav2_prepare_tokens_spv,

@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -153,6 +154,7 @@ private:
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorType> descriptor_types_;
+    std::vector<VkAccessFlags> descriptor_access_;
     mutable std::vector<VkDescriptorSet> cached_descriptor_sets_;
     std::uint32_t push_constant_bytes_ = 0;
 };
@@ -225,6 +227,12 @@ public:
         const std::uint32_t* spirv,
         std::size_t spirv_bytes,
         const std::vector<VkDescriptorType>& descriptor_types,
+        std::uint32_t push_constant_bytes);
+    VulkanPipeline create_pipeline(
+        const std::uint32_t* spirv,
+        std::size_t spirv_bytes,
+        const std::vector<VkDescriptorType>& descriptor_types,
+        const std::vector<VkAccessFlags>& descriptor_access,
         std::uint32_t push_constant_bytes);
 
     void dispatch(
@@ -356,6 +364,12 @@ private:
     bool batch_has_dispatch_ = false;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
+    std::unordered_map<VkBuffer, VkAccessFlags>
+        batch_buffer_access_;
+    std::unordered_map<VkImage, VkAccessFlags>
+        batch_image_access_;
+    std::unordered_map<VkImage, VkImageLayout>
+        batch_image_layout_;
     std::vector<VulkanDeferredBuffer> device_buffer_pool_;
     std::vector<VulkanDeferredBuffer> host_buffer_pool_;
     VkDeviceSize pooled_device_bytes_ = 0;

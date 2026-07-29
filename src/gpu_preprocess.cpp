@@ -13,7 +13,14 @@ GpuPreprocessor::GpuPreprocessor(VulkanContext& context)
       pipeline_(context.create_pipeline(
           dav2_preprocess_rgba_spv,
           dav2_preprocess_rgba_spv_size,
-          2,
+          {
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          },
+          {
+              VK_ACCESS_SHADER_READ_BIT,
+              VK_ACCESS_SHADER_WRITE_BIT,
+          },
           6 * sizeof(std::uint32_t))),
       texture_pipeline_(context.create_pipeline(
           dav2_preprocess_texture_spv,
@@ -21,6 +28,10 @@ GpuPreprocessor::GpuPreprocessor(VulkanContext& context)
           {
               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          },
+          {
+              VK_ACCESS_SHADER_READ_BIT,
+              VK_ACCESS_SHADER_WRITE_BIT,
           },
           4 * sizeof(std::uint32_t))) {}
 
