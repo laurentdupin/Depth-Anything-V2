@@ -12,6 +12,10 @@
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
+#include "conv2d_tiled_spv.h"
+#include "conv2d8_tiled_spv.h"
+#include "conv2d_tiled_half_spv.h"
+#include "conv2d8_tiled_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
 #include "gelu_spv.h"
@@ -154,6 +158,26 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_conv2d8_half_spv_size,
           4,
           40)),
+      conv2d_tiled_(context.create_pipeline(
+          dav2_conv2d_tiled_spv,
+          dav2_conv2d_tiled_spv_size,
+          4,
+          40)),
+      conv2d8_tiled_(context.create_pipeline(
+          dav2_conv2d8_tiled_spv,
+          dav2_conv2d8_tiled_spv_size,
+          4,
+          40)),
+      conv2d_tiled_half_(context.create_pipeline(
+          dav2_conv2d_tiled_half_spv,
+          dav2_conv2d_tiled_half_spv_size,
+          4,
+          40)),
+      conv2d8_tiled_half_(context.create_pipeline(
+          dav2_conv2d8_tiled_half_spv,
+          dav2_conv2d8_tiled_half_spv_size,
+          4,
+          40)),
       conv_transpose_nonoverlap_(context.create_pipeline(
           dav2_conv_transpose_nonoverlap_spv,
           dav2_conv_transpose_nonoverlap_spv_size,
@@ -203,6 +227,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
+    conv2d_tiled_.set_debug_name("conv2d_tiled");
+    conv2d8_tiled_.set_debug_name("conv2d8_tiled");
+    conv2d_tiled_half_.set_debug_name("conv2d_tiled_half");
+    conv2d8_tiled_half_.set_debug_name("conv2d8_tiled_half");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
     conv_transpose_nonoverlap_half_.set_debug_name(
@@ -629,7 +657,8 @@ void VulkanOperators::conv2d(
     std::uint32_t padding,
     bool has_bias,
     bool block8,
-    bool half_weight) {
+    bool half_weight,
+    bool tiled) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0 || stride == 0 ||
         input_width + 2 * padding < kernel ||
@@ -674,10 +703,19 @@ void VulkanOperators::conv2d(
         kernel, stride, static_cast<std::int32_t>(padding),
         has_bias ? 1u : 0u,
     };
-    context_.dispatch(
-        half_weight
+    const bool use_tiled =
+        tiled && kernel == 3 && stride == 1 && padding == 1 &&
+        output_width == input_width && output_height == input_height;
+    VulkanPipeline& pipeline =
+        use_tiled
+        ? (half_weight
+            ? (block8 ? conv2d8_tiled_half_ : conv2d_tiled_half_)
+            : (block8 ? conv2d8_tiled_ : conv2d_tiled_))
+        : (half_weight
             ? (block8 ? conv2d8_half_ : conv2d_half_)
-            : (block8 ? conv2d8_ : conv2d_),
+            : (block8 ? conv2d8_ : conv2d_));
+    context_.dispatch(
+        pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),

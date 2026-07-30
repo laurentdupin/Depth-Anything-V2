@@ -35,6 +35,7 @@ if(DAV2_WITH_VULKAN)
                 "${SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_tiled_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/project_tokens_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv_transpose_nonoverlap_common.glsl"
@@ -76,6 +77,10 @@ if(DAV2_WITH_VULKAN)
     dav2_compile_shader(conv2d8)
     dav2_compile_shader(conv2d_half)
     dav2_compile_shader(conv2d8_half)
+    dav2_compile_shader(conv2d_tiled)
+    dav2_compile_shader(conv2d8_tiled)
+    dav2_compile_shader(conv2d_tiled_half)
+    dav2_compile_shader(conv2d8_tiled_half)
     dav2_compile_shader(conv_transpose_nonoverlap)
     dav2_compile_shader(conv_transpose_nonoverlap_half)
     dav2_compile_shader(bilinear_align_true)

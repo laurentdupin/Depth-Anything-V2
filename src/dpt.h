@@ -29,7 +29,9 @@ public:
     FeatureMap forward(EncoderOutput&& encoded);
 
 private:
-    void select_convolution_block();
+    void select_convolution_block(
+        std::uint32_t patch_width,
+        std::uint32_t patch_height);
     const VulkanBuffer& selected_weight(const std::string& name) const;
 
     FeatureMap conv(
@@ -61,6 +63,7 @@ private:
     bool convolution_block_selected_ = false;
     bool convolution_block8_ = false;
     bool convolution_half_weight_ = false;
+    bool convolution_tiled_ = false;
     bool force_fp32_weights_ = false;
 };
 

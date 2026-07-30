@@ -83,7 +83,8 @@ public:
         std::uint32_t padding,
         bool has_bias,
         bool block8 = false,
-        bool half_weight = false);
+        bool half_weight = false,
+        bool tiled = false);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -145,6 +146,10 @@ private:
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
     VulkanPipeline conv2d8_half_;
+    VulkanPipeline conv2d_tiled_;
+    VulkanPipeline conv2d8_tiled_;
+    VulkanPipeline conv2d_tiled_half_;
+    VulkanPipeline conv2d8_tiled_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline conv_transpose_nonoverlap_half_;
     VulkanPipeline bilinear_align_true_;

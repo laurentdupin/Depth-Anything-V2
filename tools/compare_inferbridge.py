@@ -99,13 +99,15 @@ def load_model(encoder: str, checkpoint: Path) -> DepthAnythingV2:
         encoder=encoder, features=features, out_channels=channels
     )
     try:
-        state = torch.load(
+        loaded = torch.load(
             checkpoint, map_location="cpu", weights_only=True
         )
     except RuntimeError as error:
         if "TorchScript archives" not in str(error):
             raise
-        scripted = torch.jit.load(str(checkpoint), map_location="cpu")
+        loaded = torch.jit.load(str(checkpoint), map_location="cpu")
+    if isinstance(loaded, torch.jit.ScriptModule):
+        scripted = loaded
         state = {}
         encoder_prefixes = (
             "cls_token",
@@ -121,6 +123,8 @@ def load_model(encoder: str, checkpoint: Path) -> DepthAnythingV2:
             else:
                 mapped = name
             state[mapped] = value
+    else:
+        state = loaded
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected or missing not in ([], ["pretrained.mask_token"]):
         raise RuntimeError(

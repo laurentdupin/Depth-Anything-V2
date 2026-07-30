@@ -67,7 +67,9 @@ DptHead::DptHead(
     }
 }
 
-void DptHead::select_convolution_block() {
+void DptHead::select_convolution_block(
+    std::uint32_t patch_width,
+    std::uint32_t patch_height) {
     constexpr std::uint32_t side = 16;
     const VkDeviceSize bytes =
         elements(side, side, features_) * sizeof(float);
@@ -98,7 +100,8 @@ void DptHead::select_convolution_block() {
                     1,
                     true,
                     block8,
-                    half_weight);
+                    half_weight,
+                    false);
             }
         });
         return std::chrono::duration<double, std::micro>(
@@ -159,6 +162,105 @@ void DptHead::select_convolution_block() {
         : best_fp32;
     convolution_block8_ = best->block8;
     convolution_half_weight_ = best->half_weight;
+    const std::uint32_t full_width = patch_width * 14;
+    const std::uint32_t full_height = patch_height * 14;
+    VulkanBuffer full_input = context_.create_device_buffer(
+        elements(full_width, full_height, features_ / 2) * sizeof(float));
+    VulkanBuffer full_output = context_.create_device_buffer(
+        elements(full_width, full_height, 32) * sizeof(float));
+    const GpuTensor& output_weight = weights_.tensor(
+        "depth_head.scratch.output_conv2.0.weight");
+    const VulkanBuffer& output_bias = weight(
+        weights_,
+        "depth_head.scratch.output_conv2.0.bias");
+    const std::uint32_t largest_width = patch_width * 4;
+    const std::uint32_t largest_height = patch_height * 4;
+    const VkDeviceSize refinement_bytes =
+        elements(largest_width, largest_height, features_) * sizeof(float);
+    VulkanBuffer refinement_input =
+        context_.create_device_buffer(refinement_bytes);
+    VulkanBuffer refinement_output =
+        context_.create_device_buffer(refinement_bytes);
+    const GpuTensor& refinement_weight = weights_.tensor(
+        "depth_head.scratch.refinenet1.resConfUnit2.conv1.weight");
+    const VulkanBuffer& refinement_bias = weight(
+        weights_,
+        "depth_head.scratch.refinenet1.resConfUnit2.conv1.bias");
+    const auto run_tiled = [&](bool tiled) {
+        const auto start = std::chrono::steady_clock::now();
+        context_.batch([&] {
+            // Approximate the complete DPT 3x3 mix. The refinement units
+            // dominate, while one full-resolution 32-channel convolution
+            // captures the depth head's different shape.
+            constexpr std::array<std::uint32_t, 4> scale = {1, 1, 2, 4};
+            constexpr std::array<std::uint32_t, 4> repetitions = {4, 6, 6, 4};
+            for (std::size_t level = 0; level < scale.size(); ++level) {
+                const std::uint32_t width =
+                    std::max(1u, patch_width * scale[level] / 2);
+                const std::uint32_t height =
+                    std::max(1u, patch_height * scale[level] / 2);
+                for (std::uint32_t repetition = 0;
+                     repetition < repetitions[level];
+                     ++repetition) {
+                    operators_.conv2d(
+                        refinement_output,
+                        refinement_input,
+                        convolution_half_weight_
+                            ? refinement_weight.half_buffer
+                            : refinement_weight.buffer,
+                        refinement_bias,
+                        width,
+                        height,
+                        features_,
+                        features_,
+                        3,
+                        1,
+                        1,
+                        true,
+                        convolution_block8_,
+                        convolution_half_weight_,
+                        tiled);
+                }
+            }
+            operators_.conv2d(
+                full_output,
+                full_input,
+                convolution_half_weight_
+                    ? output_weight.half_buffer
+                    : output_weight.buffer,
+                output_bias,
+                full_width,
+                full_height,
+                features_ / 2,
+                32,
+                3,
+                1,
+                1,
+                true,
+                convolution_block8_,
+                convolution_half_weight_,
+                tiled);
+        });
+        return std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    std::array<double, 3> direct_samples{};
+    std::array<double, 3> tiled_samples{};
+    run_tiled(false);
+    run_tiled(true);
+    for (std::size_t sample = 0; sample < direct_samples.size(); ++sample) {
+        if ((sample & 1u) == 0) {
+            direct_samples[sample] = run_tiled(false);
+            tiled_samples[sample] = run_tiled(true);
+        } else {
+            tiled_samples[sample] = run_tiled(true);
+            direct_samples[sample] = run_tiled(false);
+        }
+    }
+    std::sort(direct_samples.begin(), direct_samples.end());
+    std::sort(tiled_samples.begin(), tiled_samples.end());
+    convolution_tiled_ =
+        tiled_samples[1] < direct_samples[1] * 0.95;
     weights_.retain_dpt_precision(convolution_half_weight_);
     convolution_block_selected_ = true;
 }
@@ -210,7 +312,8 @@ FeatureMap DptHead::conv(
         padding,
         has_bias,
         convolution_block8_,
-        convolution_half_weight_);
+        convolution_half_weight_,
+        convolution_tiled_);
     return output;
 }
 
@@ -300,7 +403,9 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
         throw std::invalid_argument("invalid DPT encoder output");
     }
     if (!convolution_block_selected_) {
-        select_convolution_block();
+        select_convolution_block(
+            encoded.patch_width,
+            encoded.patch_height);
     }
     FeatureMap layers[4];
     const auto run_projections = [&] {
