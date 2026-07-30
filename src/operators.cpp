@@ -24,6 +24,12 @@
 #include "linear16_spv.h"
 #include "linear_half_spv.h"
 #include "linear16_half_spv.h"
+#include "linear_vec4_spv.h"
+#include "linear_vec4_half_spv.h"
+#include "linear_vec8_spv.h"
+#include "linear_vec8_half_spv.h"
+#include "linear_vec16_spv.h"
+#include "linear_vec16_half_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -80,6 +86,36 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       linear16_half_(context.create_pipeline(
           dav2_linear16_half_spv,
           dav2_linear16_half_spv_size,
+          4,
+          12)),
+      linear_vec4_(context.create_pipeline(
+          dav2_linear_vec4_spv,
+          dav2_linear_vec4_spv_size,
+          4,
+          12)),
+      linear_vec4_half_(context.create_pipeline(
+          dav2_linear_vec4_half_spv,
+          dav2_linear_vec4_half_spv_size,
+          4,
+          12)),
+      linear_vec8_(context.create_pipeline(
+          dav2_linear_vec8_spv,
+          dav2_linear_vec8_spv_size,
+          4,
+          12)),
+      linear_vec8_half_(context.create_pipeline(
+          dav2_linear_vec8_half_spv,
+          dav2_linear_vec8_half_spv_size,
+          4,
+          12)),
+      linear_vec16_(context.create_pipeline(
+          dav2_linear_vec16_spv,
+          dav2_linear_vec16_spv_size,
+          4,
+          12)),
+      linear_vec16_half_(context.create_pipeline(
+          dav2_linear_vec16_half_spv,
+          dav2_linear_vec16_half_spv_size,
           4,
           12)),
       gelu_(context.create_pipeline(
@@ -207,6 +243,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
     linear16_half_.set_debug_name("linear16_half");
+    linear_vec4_.set_debug_name("linear_vec4");
+    linear_vec4_half_.set_debug_name("linear_vec4_half");
+    linear_vec8_.set_debug_name("linear_vec8");
+    linear_vec8_half_.set_debug_name("linear_vec8_half");
+    linear_vec16_.set_debug_name("linear_vec16");
+    linear_vec16_half_.set_debug_name("linear_vec16_half");
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -252,7 +294,9 @@ void VulkanOperators::linear(
     std::uint32_t output_columns,
     bool gelu,
     bool block16,
-    bool half_weight) {
+    bool half_weight,
+    bool vectorized,
+    std::uint32_t vector_tile) {
     if (rows == 0 || input_columns == 0 || output_columns == 0) {
         throw std::invalid_argument("linear dimensions cannot be zero");
     }
@@ -272,10 +316,18 @@ void VulkanOperators::linear(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
-    context_.dispatch(
-        half_weight
+    VulkanPipeline& pipeline =
+        vectorized
+        ? (vector_tile == 16
+            ? (half_weight ? linear_vec16_half_ : linear_vec16_)
+            : (vector_tile == 8
+                ? (half_weight ? linear_vec8_half_ : linear_vec8_)
+                : (half_weight ? linear_vec4_half_ : linear_vec4_)))
+        : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
-            : (block16 ? linear16_ : linear_),
+            : (block16 ? linear16_ : linear_));
+    context_.dispatch(
+        pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
