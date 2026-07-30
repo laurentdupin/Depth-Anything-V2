@@ -28,11 +28,13 @@ DptHead::DptHead(
     dav2_encoder encoder,
     VulkanContext& context,
     GpuModel& weights,
-    VulkanOperators& operators)
+    VulkanOperators& operators,
+    bool force_fp32)
     : context_(context),
       weights_(weights),
       operators_(operators),
-      zero_bias_(context.create_device_buffer(sizeof(float))) {
+      zero_bias_(context.create_device_buffer(sizeof(float))),
+      force_fp32_(force_fp32) {
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
     switch (encoder) {
@@ -151,7 +153,7 @@ void DptHead::select_convolution_block() {
         }
     }
     Candidate* best =
-        features_ >= 256 &&
+        !force_fp32_ && features_ >= 256 &&
             best_half_time < best_fp32_time * 0.96
         ? best_half
         : best_fp32;

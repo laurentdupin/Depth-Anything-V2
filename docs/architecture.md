@@ -64,6 +64,15 @@ GPU results are numerically close but not bitwise identical; backend-specific
 reductions, transcendental implementations, and selected packed-FP16 storage
 accumulate small differences through the transformer.
 
+The InferBridge worker-compatibility path is independently validated at the
+smallest supported size (140) across all 22 assets and the RX 9070, GTX 1080,
+and RX 6700 XT. It uses the accuracy-first `DAV2_CREATE_FORCE_FP32` mode and
+the exact erf GELU required by PyTorch. Worst relative L1 deviations are
+0.0006% for ViT-S, 0.0062% for ViT-B, and 0.0010% for ViT-L. The maximum
+absolute deviations on the normalized [0, 1] output are 0.000043, 0.000181,
+and 0.000069 respectively. `tools/compare_inferbridge.py` reproduces this
+198-image/model/device comparison.
+
 The same runs, including each context's first-use autotuning and the poster's
 extreme aspect ratio, took 4.449/8.388/23.537 seconds in the DLL versus
 25.232/68.725/197.102 seconds in PyTorch CPU for ViT-S/B/L: aggregate speedups
@@ -209,6 +218,16 @@ The exported surface is deliberately small:
   D3D12 `R32_FLOAT` texture plus completion fence through the same job and
   lease lifecycle;
 - obtain stable status strings and a thread-local detailed error.
+
+The DLL additionally exports InferBridge harness ABI 1.6 without adding a
+runtime dependency on InferBridge. That compatibility surface is host-memory
+only and implements the existing Python worker's unusual BGRA/BGR,
+legacy-nearest, transposed processed-shape, normalized-depth behavior. The
+standalone D3D12 texture API remains available under the DAV2 ABI, but it is
+not advertised by the embedded harness because its current preprocessing and
+output-size semantics implement the official DAV2 API instead. An exact
+end-to-end GPU resource path must be implemented and validated before those
+capabilities can truthfully be enabled in the harness.
 
 Every input dimension is checked before allocation or dispatch. Network tensor
 dimensions must be positive multiples of the 14-pixel patch size. A context is

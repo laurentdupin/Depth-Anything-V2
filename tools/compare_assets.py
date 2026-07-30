@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 class Compose:
     def __init__(self, transforms):
@@ -192,7 +194,8 @@ def main() -> None:
 
     dll = configure_dll(args.dll)
     options = CreateOptions(
-        ctypes.sizeof(CreateOptions), 1, config["enum"], 0, 0
+        ctypes.sizeof(CreateOptions), 1, config["enum"], 0,
+        1 if args.input_size < 280 else 0
     )
     context = ctypes.c_void_p()
     start = time.perf_counter()

@@ -105,6 +105,19 @@ the caller owns preprocessing. See
 [`include/depth_anything_v2.h`](include/depth_anything_v2.h) and
 [`docs/architecture.md`](docs/architecture.md) for the full contract.
 
+The same DLL exports InferBridge harness ABI 1.6. Its embedded adapter
+implements the current Depth Anything V2 worker contract exactly: BGRA host
+input, the worker's transposed legacy-nearest resize, BGR channel order,
+ImageNet normalization, and min/max-normalized float32 depth at the processed
+dimensions. The harness currently advertises host-memory resources only.
+Although the standalone DAV2 API retains its proven D3D12/Vulkan texture
+path, that path uses the official RGB/cubic/source-size contract and is not
+falsely exposed as an equivalent InferBridge GPU-resource capability.
+
+`DAV2_CREATE_FORCE_FP32` selects the accuracy-first graph used by the embedded
+harness. The regular zero-flags API keeps autotuned packed-weight paths
+available to callers prioritizing throughput.
+
 The same runtime builds for Android arm64 and has been validated as a
 standalone Vulkan process on Meta Quest 3S. See
 [`docs/android.md`](docs/android.md) for the reproducible Unity-NDK build and

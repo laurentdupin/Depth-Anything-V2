@@ -3,6 +3,7 @@
 #include "executor.h"
 #include "image.h"
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
 #include <memory>
@@ -15,6 +16,7 @@ struct dav2_context {
     std::shared_ptr<dav2::Executor> executor;
     dav2::ImageScratch image_scratch;
     std::vector<float> image_input;
+    std::vector<float> image_output;
 };
 
 struct dav2_gpu_job {
@@ -93,7 +95,8 @@ namespace dav2 {
 std::unique_ptr<Executor> create_executor(
     const std::string&,
     dav2_encoder,
-    int) {
+    int,
+    std::uint32_t) {
     throw std::runtime_error(
         "this DLL was built without Vulkan");
 }
@@ -151,6 +154,22 @@ dav2_status DAV2_CALL dav2_get_network_shape(
     });
 }
 
+dav2_status DAV2_CALL dav2_get_inferbridge_shape(
+    int32_t image_width,
+    int32_t image_height,
+    int32_t input_size,
+    dav2_image_shape* output_shape) {
+    if (output_shape == nullptr) {
+        return fail(DAV2_STATUS_INVALID_ARGUMENT, "output_shape is null");
+    }
+    return protect([&] {
+        const dav2::ImageShape upstream =
+            dav2::network_shape(image_width, image_height, input_size);
+        output_shape->width = upstream.height;
+        output_shape->height = upstream.width;
+    });
+}
+
 dav2_status DAV2_CALL dav2_create(
     const char* model_path_utf8,
     const dav2_create_options* options,
@@ -171,13 +190,17 @@ dav2_status DAV2_CALL dav2_create(
     if (!supported_encoder(options->encoder)) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported encoder");
     }
+    if ((options->flags & ~DAV2_CREATE_FORCE_FP32) != 0) {
+        return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported create flags");
+    }
     return protect([&] {
         auto result = std::make_unique<dav2_context>();
         result->executor = std::shared_ptr<dav2::Executor>(
             dav2::create_executor(
                 model_path_utf8,
                 options->encoder,
-                options->vulkan_device_index));
+                options->vulkan_device_index,
+                options->flags));
         *context = result.release();
     });
 }
@@ -601,6 +624,54 @@ dav2_status DAV2_CALL dav2_infer_bgr8(
             output_depth,
             image_width,
             image_height);
+    });
+}
+
+dav2_status DAV2_CALL dav2_inferbridge_bgra8_f32(
+    dav2_context* context,
+    const uint8_t* bgra,
+    int32_t image_width,
+    int32_t image_height,
+    ptrdiff_t row_stride_bytes,
+    int32_t input_size,
+    float* output_depth,
+    size_t output_count) {
+    if (context == nullptr || bgra == nullptr || output_depth == nullptr) {
+        return fail(DAV2_STATUS_INVALID_ARGUMENT, "null inference argument");
+    }
+    return protect([&] {
+        const dav2::ImageShape upstream =
+            dav2::network_shape(image_width, image_height, input_size);
+        const dav2::ImageShape output_shape{
+            upstream.height, upstream.width};
+        const size_t required =
+            static_cast<size_t>(output_shape.width) * output_shape.height;
+        if (output_count < required) {
+            throw ApiError(
+                DAV2_STATUS_BUFFER_TOO_SMALL,
+                "output buffer is too small");
+        }
+        dav2::preprocess_inferbridge_bgra8(
+            bgra, image_width, image_height, row_stride_bytes,
+            output_shape, context->image_input);
+        context->image_output.resize(required);
+        context->executor->infer(
+            context->image_input.data(),
+            output_shape.width,
+            output_shape.height,
+            context->image_output.data());
+        const auto bounds = std::minmax_element(
+            context->image_output.begin(), context->image_output.end());
+        const float minimum = *bounds.first;
+        const float span = *bounds.second - minimum;
+        if (!(span > 0.0f)) {
+            std::fill_n(output_depth, required, 0.0f);
+            return;
+        }
+        for (size_t index = 0; index < required; ++index) {
+            output_depth[index] =
+                (context->image_output[index] - minimum) / span;
+        }
     });
 }
 

@@ -23,7 +23,8 @@ public:
         dav2_encoder encoder,
         VulkanContext& context,
         GpuModel& weights,
-        VulkanOperators& operators);
+        VulkanOperators& operators,
+        bool force_fp32);
 
     FeatureMap forward(EncoderOutput&& encoded);
 
@@ -60,6 +61,7 @@ private:
     bool convolution_block_selected_ = false;
     bool convolution_block8_ = false;
     bool convolution_half_weight_ = false;
+    bool force_fp32_ = false;
 };
 
 }  // namespace dav2

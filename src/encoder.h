@@ -26,7 +26,8 @@ public:
         dav2_encoder encoder,
         VulkanContext& context,
         GpuModel& weights,
-        VulkanOperators& operators);
+        VulkanOperators& operators,
+        bool force_fp32);
 
     EncoderOutput forward(
         const VulkanBuffer& image,
@@ -54,6 +55,7 @@ private:
     bool linear_tile_selected_ = false;
     bool linear_block16_ = false;
     bool linear_half_weight_ = false;
+    bool force_fp32_ = false;
     std::unordered_map<std::uint32_t, bool> half_attention_by_tokens_;
 };
 

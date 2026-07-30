@@ -87,6 +87,7 @@ endif()
 
 add_library(depth_anything_v2 SHARED
     src/dav2.cpp
+    src/inferbridge_harness.cpp
     src/image.cpp
 )
 add_library(depth_anything_v2::depth_anything_v2 ALIAS depth_anything_v2)
@@ -102,6 +103,7 @@ target_include_directories(depth_anything_v2
 target_compile_definitions(depth_anything_v2
     PRIVATE
         DAV2_BUILD_DLL
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY
         $<$<BOOL:${DAV2_WITH_VULKAN}>:DAV2_WITH_VULKAN=1>
 )
 set_target_properties(depth_anything_v2 PROPERTIES
@@ -134,7 +136,11 @@ install(TARGETS depth_anything_v2
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
-install(FILES include/depth_anything_v2.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(
+    FILES
+        include/depth_anything_v2.h
+        include/inferbridge_harness.h
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
 if(DAV2_BUILD_TOOLS)
     add_executable(dav2_run tools/dav2_run.c)
@@ -168,6 +174,28 @@ if(DAV2_BUILD_TESTS)
     add_executable(dav2_c_abi_smoke tests/c_abi_smoke.c)
     target_link_libraries(dav2_c_abi_smoke PRIVATE depth_anything_v2)
     add_test(NAME dav2_c_abi_smoke COMMAND dav2_c_abi_smoke)
+
+    add_executable(
+        dav2_harness_abi_smoke tests/harness_abi_smoke.c)
+    target_link_libraries(
+        dav2_harness_abi_smoke PRIVATE depth_anything_v2)
+    target_include_directories(
+        dav2_harness_abi_smoke PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(
+        NAME dav2_harness_abi_smoke COMMAND dav2_harness_abi_smoke)
+
+    add_executable(
+        dav2_harness_full_graph tests/harness_full_graph.cpp)
+    target_link_libraries(
+        dav2_harness_full_graph PRIVATE depth_anything_v2)
+    target_include_directories(
+        dav2_harness_full_graph PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(
+        NAME dav2_harness_full_graph COMMAND dav2_harness_full_graph)
+    set_tests_properties(
+        dav2_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(dav2_image_tests tests/image_tests.cpp src/image.cpp)
     target_include_directories(dav2_image_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

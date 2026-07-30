@@ -19,10 +19,31 @@ void main() {
         return;
     }
     const float value = input_buffer.data[index];
-    const float cube = value * value * value;
-    const float inner =
-        0.7978845608028654 * (value + 0.044715 * cube);
+    /*
+     * torch.nn.GELU defaults to the exact erf formulation. GLSL 450 has no
+     * erf intrinsic, so use the Numerical Recipes erfc approximation. Its
+     * maximum scalar error is approximately 1.2e-7, unlike the former tanh
+     * GELU approximation whose layer-by-layer drift was visible after the
+     * worker's depth min/max normalization.
+     */
+    const float x = value * 0.7071067811865475;
+    const float magnitude = abs(x);
+    const float t = 1.0 / (1.0 + 0.5 * magnitude);
+    const float polynomial =
+        -1.26551223 +
+        t * (1.00002368 +
+        t * (0.37409196 +
+        t * (0.09678418 +
+        t * (-0.18628806 +
+        t * (0.27886807 +
+        t * (-1.13520398 +
+        t * (1.48851587 +
+        t * (-0.82215223 +
+        t * 0.17087277))))))));
+    const float erfc_magnitude =
+        t * exp(-magnitude * magnitude + polynomial);
+    const float erf_value =
+        x >= 0.0 ? 1.0 - erfc_magnitude : erfc_magnitude - 1.0;
     output_buffer.data[index] =
-        0.5 * value *
-        (1.0 + tanh(clamp(inner, -15.0, 15.0)));
+        0.5 * value * (1.0 + erf_value);
 }

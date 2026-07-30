@@ -55,6 +55,14 @@ typedef struct dav2_create_options {
     uint32_t flags;
 } dav2_create_options;
 
+enum {
+    /*
+     * Retain and execute FP32 weights and attention scores. This trades some
+     * speed and device memory for the tightest cross-backend reproducibility.
+     */
+    DAV2_CREATE_FORCE_FP32 = 1u << 0u
+};
+
 typedef struct dav2_image_shape {
     int32_t width;
     int32_t height;
@@ -214,6 +222,12 @@ DAV2_API dav2_status DAV2_CALL dav2_get_network_shape(
     int32_t input_size,
     dav2_image_shape* network_shape);
 
+DAV2_API dav2_status DAV2_CALL dav2_get_inferbridge_shape(
+    int32_t image_width,
+    int32_t image_height,
+    int32_t input_size,
+    dav2_image_shape* output_shape);
+
 DAV2_API dav2_status DAV2_CALL dav2_create(
     const char* model_path_utf8,
     const dav2_create_options* options,
@@ -275,6 +289,22 @@ DAV2_API void DAV2_CALL dav2_gpu_output_release(
 DAV2_API dav2_status DAV2_CALL dav2_infer_bgr8(
     dav2_context* context,
     const uint8_t* bgr,
+    int32_t image_width,
+    int32_t image_height,
+    ptrdiff_t row_stride_bytes,
+    int32_t input_size,
+    float* output_depth,
+    size_t output_count);
+
+/*
+ * Exact InferBridge BGRA contract: preserve captured BGR bytes as model
+ * channels, use PyTorch legacy-nearest resize, retain the worker's transposed
+ * interpolation dimensions, and return min/max-normalized FP32 depth at the
+ * network dimensions.
+ */
+DAV2_API dav2_status DAV2_CALL dav2_inferbridge_bgra8_f32(
+    dav2_context* context,
+    const uint8_t* bgra,
     int32_t image_width,
     int32_t image_height,
     ptrdiff_t row_stride_bytes,

@@ -483,7 +483,8 @@ public:
     VulkanExecutor(
         const std::string& model_path,
         dav2_encoder encoder,
-        int vulkan_device_index)
+        int vulkan_device_index,
+        std::uint32_t flags)
         : model_(model_path, encoder),
           context_(
               static_cast<std::uint32_t>(vulkan_device_index),
@@ -491,8 +492,12 @@ public:
           weights_(model_, context_),
           operators_(context_),
           preprocessor_(context_),
-          encoder_(encoder, context_, weights_, operators_),
-          dpt_(encoder, context_, weights_, operators_)
+          encoder_(
+              encoder, context_, weights_, operators_,
+              (flags & DAV2_CREATE_FORCE_FP32) != 0),
+          dpt_(
+              encoder, context_, weights_, operators_,
+              (flags & DAV2_CREATE_FORCE_FP32) != 0)
 #if defined(_WIN32)
           , d3d12_device_(
               matching_d3d12_device(context_.adapter_luid())),
@@ -838,12 +843,13 @@ private:
 std::unique_ptr<Executor> create_executor(
     const std::string& model_path,
     dav2_encoder encoder,
-    int vulkan_device_index) {
+    int vulkan_device_index,
+    std::uint32_t flags) {
     if (vulkan_device_index < 0) {
         throw std::invalid_argument("vulkan_device_index must be non-negative");
     }
     return std::make_unique<VulkanExecutor>(
-        model_path, encoder, vulkan_device_index);
+        model_path, encoder, vulkan_device_index, flags);
 }
 
 GpuCapabilities probe_gpu_capabilities(
