@@ -114,9 +114,12 @@ Although the standalone DAV2 API retains its proven D3D12/Vulkan texture
 path, that path uses the official RGB/cubic/source-size contract and is not
 falsely exposed as an equivalent InferBridge GPU-resource capability.
 
-`DAV2_CREATE_FORCE_FP32` selects the accuracy-first graph used by the embedded
-harness. The regular zero-flags API keeps autotuned packed-weight paths
-available to callers prioritizing throughput.
+The embedded harness keeps attention scores in FP32, the operation shown by
+the cross-device validation matrix to dominate normalized-output drift, while
+retaining safe per-adapter weight autotuning. `DAV2_CREATE_FORCE_FP32`
+remains available to callers requiring the tightest possible reproducibility;
+the regular zero-flags API also autotunes packed attention scores for callers
+prioritizing throughput.
 
 The same runtime builds for Android arm64 and has been validated as a
 standalone Vulkan process on Meta Quest 3S. See

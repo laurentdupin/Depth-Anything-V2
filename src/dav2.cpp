@@ -190,7 +190,11 @@ dav2_status DAV2_CALL dav2_create(
     if (!supported_encoder(options->encoder)) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported encoder");
     }
-    if ((options->flags & ~DAV2_CREATE_FORCE_FP32) != 0) {
+    constexpr uint32_t supported_flags =
+        DAV2_CREATE_FORCE_FP32 |
+        DAV2_CREATE_FORCE_FP32_WEIGHTS |
+        DAV2_CREATE_FORCE_FP32_ATTENTION;
+    if ((options->flags & ~supported_flags) != 0) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported create flags");
     }
     return protect([&] {

@@ -60,7 +60,10 @@ enum {
      * Retain and execute FP32 weights and attention scores. This trades some
      * speed and device memory for the tightest cross-backend reproducibility.
      */
-    DAV2_CREATE_FORCE_FP32 = 1u << 0u
+    DAV2_CREATE_FORCE_FP32 = 1u << 0u,
+    /* Development/tuning controls; the combined flag above is preferred. */
+    DAV2_CREATE_FORCE_FP32_WEIGHTS = 1u << 1u,
+    DAV2_CREATE_FORCE_FP32_ATTENTION = 1u << 2u
 };
 
 typedef struct dav2_image_shape {

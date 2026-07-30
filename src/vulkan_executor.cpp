@@ -494,10 +494,14 @@ public:
           preprocessor_(context_),
           encoder_(
               encoder, context_, weights_, operators_,
-              (flags & DAV2_CREATE_FORCE_FP32) != 0),
+              (flags & (DAV2_CREATE_FORCE_FP32 |
+                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0,
+              (flags & (DAV2_CREATE_FORCE_FP32 |
+                        DAV2_CREATE_FORCE_FP32_ATTENTION)) != 0),
           dpt_(
               encoder, context_, weights_, operators_,
-              (flags & DAV2_CREATE_FORCE_FP32) != 0)
+              (flags & (DAV2_CREATE_FORCE_FP32 |
+                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0)
 #if defined(_WIN32)
           , d3d12_device_(
               matching_d3d12_device(context_.adapter_luid())),

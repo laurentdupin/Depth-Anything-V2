@@ -66,12 +66,21 @@ accumulate small differences through the transformer.
 
 The InferBridge worker-compatibility path is independently validated at the
 smallest supported size (140) across all 22 assets and the RX 9070, GTX 1080,
-and RX 6700 XT. It uses the accuracy-first `DAV2_CREATE_FORCE_FP32` mode and
-the exact erf GELU required by PyTorch. Worst relative L1 deviations are
-0.0006% for ViT-S, 0.0062% for ViT-B, and 0.0010% for ViT-L. The maximum
-absolute deviations on the normalized [0, 1] output are 0.000043, 0.000181,
-and 0.000069 respectively. `tools/compare_inferbridge.py` reproduces this
-198-image/model/device comparison.
+and RX 6700 XT. It uses the exact erf GELU required by PyTorch, forces FP32
+attention scores, and retains per-adapter weight autotuning. Worst relative L1
+deviations are 0.1224% for ViT-S, 0.2014% for ViT-B, and 0.1089% for ViT-L.
+The maximum absolute deviations on the normalized [0, 1] output are 0.004924,
+0.008126, and 0.001926 respectively. All remain below the 1% requirement.
+`tools/compare_inferbridge.py` reproduces this 198-image/model/device
+comparison and can select individual precision flags for tuning experiments.
+
+Keeping only attention scores in FP32 recovers safe packed-weight wins where
+the device's measured kernels justify them. At ViT-B/ViT-L 140, matched
+end-to-end harness medians on the RX 6700 XT improved from 42.2/167.0 ms to
+39.3/126.7 ms. The GTX 1080's marginal packed DPT result was rejected by
+requiring a 10% isolated convolution advantage; its ViT-L median remained
+approximately 347 ms instead of regressing to 366 ms. This rule is based on
+measured candidate times and model scale, not adapter names or vendor IDs.
 
 The same runs, including each context's first-use autotuning and the poster's
 extreme aspect ratio, took 4.449/8.388/23.537 seconds in the DLL versus

@@ -27,12 +27,14 @@ DinoEncoder::DinoEncoder(
     VulkanContext& context,
     GpuModel& weights,
     VulkanOperators& operators,
-    bool force_fp32)
+    bool force_fp32_weights,
+    bool force_fp32_attention)
     : encoder_(encoder),
       context_(context),
       weights_(weights),
       operators_(operators),
-      force_fp32_(force_fp32) {
+      force_fp32_weights_(force_fp32_weights),
+      force_fp32_attention_(force_fp32_attention) {
     switch (encoder_) {
         case DAV2_ENCODER_VITS:
             embedding_ = 384;
@@ -187,7 +189,7 @@ void DinoEncoder::select_linear_tile() {
         }
     }
     Candidate* best =
-        !force_fp32_ && best_half_time < best_fp32_time * 0.96
+        !force_fp32_weights_ && best_half_time < best_fp32_time * 0.96
         ? best_half
         : best_fp32;
     linear_block16_ = best->block16;
@@ -319,7 +321,7 @@ EncoderOutput DinoEncoder::forward(
     });
     const auto existing_attention =
         half_attention_by_tokens_.find(tokens);
-    const bool half_attention = force_fp32_
+    const bool half_attention = force_fp32_attention_
         ? false
         : existing_attention != half_attention_by_tokens_.end()
         ? existing_attention->second

@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
         dav2::GpuModel weights(model, context);
         dav2::VulkanOperators operators(context);
         dav2::DinoEncoder implementation(
-            encoder, context, weights, operators, false);
+            encoder, context, weights, operators, false, false);
         auto gpu_input =
             context.create_device_buffer(input.size() * sizeof(float));
         context.upload(

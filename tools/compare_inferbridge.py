@@ -165,6 +165,7 @@ def main() -> None:
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--device", type=int, required=True)
     parser.add_argument("--size", type=int, default=140)
+    parser.add_argument("--create-flags", type=int, default=1)
     args = parser.parse_args()
 
     model = load_model(args.encoder, args.checkpoint)
@@ -174,7 +175,7 @@ def main() -> None:
         1,
         CONFIGS[args.encoder][0],
         args.device,
-        1,
+        args.create_flags,
     )
     context = ctypes.c_void_p()
     status = dll.dav2_create(

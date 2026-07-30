@@ -274,7 +274,8 @@ ibrh_result IBRH_CALL model_load(
     }
     const dav2_create_options options{
         sizeof(options), DAV2_ABI_VERSION, encoder(path, parameters),
-        runtime->vulkan_device_index, DAV2_CREATE_FORCE_FP32};
+        runtime->vulkan_device_index,
+        DAV2_CREATE_FORCE_FP32_ATTENTION};
     const dav2_status status =
         dav2_create(path.c_str(), &options, &model->context);
     if (status != DAV2_STATUS_OK) {
