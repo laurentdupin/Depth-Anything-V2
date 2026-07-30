@@ -2,6 +2,7 @@
 /.BuildAndroid/
 /checkpoints/
 /models/
+/out/
 /validation/
 __pycache__/
 *.py[cod]
