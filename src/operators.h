@@ -24,6 +24,17 @@ public:
         bool vectorized = false,
         std::uint32_t vector_tile = 0);
 
+    void linear_residual_wide(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& weight,
+        const VulkanBuffer& bias,
+        const VulkanBuffer& residual,
+        const VulkanBuffer& scale,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns);
+
     void layer_norm(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -137,6 +148,7 @@ private:
     VulkanPipeline linear_vec8_half_;
     VulkanPipeline linear_vec16_;
     VulkanPipeline linear_vec16_half_;
+    VulkanPipeline linear_vec16_residual_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;

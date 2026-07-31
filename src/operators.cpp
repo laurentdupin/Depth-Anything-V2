@@ -33,6 +33,7 @@
 #include "linear_vec8_half_spv.h"
 #include "linear_vec16_spv.h"
 #include "linear_vec16_half_spv.h"
+#include "linear_vec16_residual_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -120,6 +121,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_linear_vec16_half_spv,
           dav2_linear_vec16_half_spv_size,
           4,
+          12)),
+      linear_vec16_residual_(context.create_pipeline(
+          dav2_linear_vec16_residual_spv,
+          dav2_linear_vec16_residual_spv_size,
+          6,
           12)),
       gelu_(context.create_pipeline(
           dav2_gelu_spv, dav2_gelu_spv_size, 2, 4)),
@@ -261,6 +267,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_vec8_half_.set_debug_name("linear_vec8_half");
     linear_vec16_.set_debug_name("linear_vec16");
     linear_vec16_half_.set_debug_name("linear_vec16_half");
+    linear_vec16_residual_.set_debug_name("linear_vec16_residual");
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -369,6 +376,49 @@ void VulkanOperators::linear(
             sizeof(gelu_parameters),
             divide_up(gelu_parameters.count, 256));
     }
+}
+
+void VulkanOperators::linear_residual_wide(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& weight,
+    const VulkanBuffer& bias,
+    const VulkanBuffer& residual,
+    const VulkanBuffer& scale,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns) {
+    if (rows == 0 || input_columns == 0 || output_columns == 0) {
+        throw std::invalid_argument(
+            "linear-residual dimensions cannot be zero");
+    }
+    require_bytes(input, std::uint64_t(rows) * input_columns, "input");
+    require_bytes(
+        weight,
+        std::uint64_t(output_columns) * input_columns,
+        "weight");
+    require_bytes(bias, output_columns, "bias");
+    require_bytes(
+        residual,
+        std::uint64_t(rows) * output_columns,
+        "residual");
+    require_bytes(scale, output_columns, "scale");
+    require_bytes(
+        output,
+        std::uint64_t(rows) * output_columns,
+        "output");
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t input_columns;
+        std::uint32_t output_columns;
+    } parameters{rows, input_columns, output_columns};
+    context_.dispatch(
+        linear_vec16_residual_,
+        {&output, &input, &weight, &bias, &residual, &scale},
+        &parameters,
+        sizeof(parameters),
+        divide_up(output_columns, 64),
+        divide_up(rows, 64));
 }
 
 void VulkanOperators::layer_norm(

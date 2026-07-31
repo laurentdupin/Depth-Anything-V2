@@ -223,6 +223,16 @@ void DinoEncoder::select_linear_tile(std::uint32_t rows) {
         !force_fp32_weights_ && best_half_time < best_fp32_time * 0.995
         ? best_half
         : best_fp32;
+    if (best->vectorized && best->vector_tile == 16) {
+        for (Candidate& candidate : candidates) {
+            if (candidate.half_weight == best->half_weight &&
+                candidate.vectorized && candidate.vector_tile == 8 &&
+                best->samples[1] >= candidate.samples[1] * 0.95) {
+                best = &candidate;
+                break;
+            }
+        }
+    }
     linear_block16_ = best->block16;
     linear_vectorized_ = best->vectorized;
     linear_vector_tile_ = best->vector_tile;
@@ -425,26 +435,39 @@ EncoderOutput DinoEncoder::forward(
                 heads_,
                 &attention_scores,
                 half_attention);
-            operators_.linear(
-                query,
-                attention,
-                linear_weight(block_name(block, ".attn.proj.weight")),
-                buffer(weights_, block_name(block, ".attn.proj.bias")),
-                tokens,
-                embedding_,
-                embedding_,
-                false,
-                linear_block16_,
-                linear_half_weight_,
-                linear_vectorized_,
-                linear_vector_tile_);
-            operators_.add_scaled(
-                next,
-                current,
-                query,
-                buffer(weights_, block_name(block, ".ls1.gamma")),
-                static_cast<std::uint32_t>(token_elements),
-                embedding_);
+            if (!linear_half_weight_ && linear_vector_tile_ == 16) {
+                operators_.linear_residual_wide(
+                    next,
+                    attention,
+                    linear_weight(block_name(block, ".attn.proj.weight")),
+                    buffer(weights_, block_name(block, ".attn.proj.bias")),
+                    current,
+                    buffer(weights_, block_name(block, ".ls1.gamma")),
+                    tokens,
+                    embedding_,
+                    embedding_);
+            } else {
+                operators_.linear(
+                    query,
+                    attention,
+                    linear_weight(block_name(block, ".attn.proj.weight")),
+                    buffer(weights_, block_name(block, ".attn.proj.bias")),
+                    tokens,
+                    embedding_,
+                    embedding_,
+                    false,
+                    linear_block16_,
+                    linear_half_weight_,
+                    linear_vectorized_,
+                    linear_vector_tile_);
+                operators_.add_scaled(
+                    next,
+                    current,
+                    query,
+                    buffer(weights_, block_name(block, ".ls1.gamma")),
+                    static_cast<std::uint32_t>(token_elements),
+                    embedding_);
+            }
             std::swap(current, next);
 
             operators_.layer_norm(
@@ -468,26 +491,39 @@ EncoderOutput DinoEncoder::forward(
                 linear_half_weight_,
                 linear_vectorized_,
                 linear_vector_tile_);
-            operators_.linear(
-                query,
-                hidden,
-                linear_weight(block_name(block, ".mlp.fc2.weight")),
-                buffer(weights_, block_name(block, ".mlp.fc2.bias")),
-                tokens,
-                embedding_ * 4,
-                embedding_,
-                false,
-                linear_block16_,
-                linear_half_weight_,
-                linear_vectorized_,
-                linear_vector_tile_);
-            operators_.add_scaled(
-                next,
-                current,
-                query,
-                buffer(weights_, block_name(block, ".ls2.gamma")),
-                static_cast<std::uint32_t>(token_elements),
-                embedding_);
+            if (!linear_half_weight_ && linear_vector_tile_ == 16) {
+                operators_.linear_residual_wide(
+                    next,
+                    hidden,
+                    linear_weight(block_name(block, ".mlp.fc2.weight")),
+                    buffer(weights_, block_name(block, ".mlp.fc2.bias")),
+                    current,
+                    buffer(weights_, block_name(block, ".ls2.gamma")),
+                    tokens,
+                    embedding_ * 4,
+                    embedding_);
+            } else {
+                operators_.linear(
+                    query,
+                    hidden,
+                    linear_weight(block_name(block, ".mlp.fc2.weight")),
+                    buffer(weights_, block_name(block, ".mlp.fc2.bias")),
+                    tokens,
+                    embedding_ * 4,
+                    embedding_,
+                    false,
+                    linear_block16_,
+                    linear_half_weight_,
+                    linear_vectorized_,
+                    linear_vector_tile_);
+                operators_.add_scaled(
+                    next,
+                    current,
+                    query,
+                    buffer(weights_, block_name(block, ".ls2.gamma")),
+                    static_cast<std::uint32_t>(token_elements),
+                    embedding_);
+            }
             std::swap(current, next);
 
             if (capture_index < 4 && block == capture_[capture_index]) {

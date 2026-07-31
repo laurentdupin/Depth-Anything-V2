@@ -37,6 +37,14 @@ vec4 read_weight4(uint vector_index) {
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
 } bias_buffer;
+#if defined(FUSED_RESIDUAL)
+layout(set = 0, binding = 4, std430) readonly buffer Residual {
+    float data[];
+} residual_buffer;
+layout(set = 0, binding = 5, std430) readonly buffer Scale {
+    float data[];
+} scale_buffer;
+#endif
 
 layout(push_constant) uniform Parameters {
     uint rows;
@@ -136,9 +144,18 @@ void main() {
         for (uint column = 0; column < 4; ++column) {
             const uint output_column = column_base + column;
             if (output_column < parameters.output_columns) {
+                float value =
+                    sums[row][column] + bias_buffer.data[output_column];
+#if defined(FUSED_RESIDUAL)
+                value =
+                    residual_buffer.data[
+                        output_row * parameters.output_columns +
+                        output_column] +
+                    value * scale_buffer.data[output_column];
+#endif
                 output_buffer.data[
                     output_row * parameters.output_columns + output_column] =
-                    sums[row][column] + bias_buffer.data[output_column];
+                    value;
             }
         }
     }
