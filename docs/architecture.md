@@ -239,14 +239,16 @@ The exported surface is deliberately small:
 - obtain stable status strings and a thread-local detailed error.
 
 The DLL additionally exports InferBridge harness ABI 1.6 without adding a
-runtime dependency on InferBridge. That compatibility surface is host-memory
-only and implements the existing Python worker's unusual BGRA/BGR,
-legacy-nearest, transposed processed-shape, normalized-depth behavior. The
-standalone D3D12 texture API remains available under the DAV2 ABI, but it is
-not advertised by the embedded harness because its current preprocessing and
-output-size semantics implement the official DAV2 API instead. An exact
-end-to-end GPU resource path must be implemented and validated before those
-capabilities can truthfully be enabled in the harness.
+runtime dependency on InferBridge. Host memory retains the existing worker's
+BGRA/BGR, legacy-nearest, transposed processed-shape behavior. The Windows
+GPU resource path maps the common ABI directly onto the proven standalone
+D3D12 texture/fence API: imported BGRA capture, official preprocessing and
+full graph, and a leased shared `R32_FLOAT` source-size texture. It preserves
+source frame/timestamp correlation, duplicates input handles before submit
+returns, exposes the signal fence/value, and never falls back to host staging.
+The hardware canary exercises the public harness entry points and the same
+native path's zero upload/download counters for all relative and metric
+encoders.
 
 Every input dimension is checked before allocation or dispatch. Network tensor
 dimensions must be positive multiples of the 14-pixel patch size. A context is

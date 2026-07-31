@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-07-31",
+  "device": "AMD Radeon RX 9070",
+  "contract": "InferBridge harness API 1.6 D3D12 shared texture/fence",
+  "input": "DXGI_FORMAT_B8G8R8A8_UNORM shared TEXTURE2D",
+  "output": "DXGI_FORMAT_R32_FLOAT shared TEXTURE2D lease",
+  "sourceDimensions": "73x51",
+  "maximumInFlightJobs": 3,
+  "commonAbiEntryPointsPassed": true,
+  "producerHandlesDuplicatedBeforeReturn": true,
+  "leaseSurvivesJobModelRuntimeRelease": true,
+  "sourceFrameAndTimestampCorrelation": true,
+  "threeRetainedLeasesAndStableReuse": true,
+  "cancellationAndShutdown": true,
+  "vkQueueWaitIdleCalls": 0,
+  "nativePathTensorUploadByteDelta": 0,
+  "nativePathTensorDownloadByteDelta": 0,
+  "counterScope": "dav2_submit_d3d12_texture, the exact native entry point called by ibrh submit",
+  "cases": [
+    {"id": "depth-anything-v2-small", "model": "depth_anything_v2_vits.dav2", "maximumCpuRelativeDeviation": 0.00284266, "passed": true},
+    {"id": "depth-anything-v2-base", "model": "depth_anything_v2_vitb.dav2", "maximumCpuRelativeDeviation": 0.00507684, "passed": true},
+    {"id": "depth-anything-v2-large", "model": "depth_anything_v2_vitl.dav2", "maximumCpuRelativeDeviation": 0.00000573679, "passed": true},
+    {"id": "depth-anything-v2-metric-hypersim-vits", "model": "depth_anything_v2_metric_hypersim_vits.dav2", "maximumCpuRelativeDeviation": 0.00221653, "passed": true},
+    {"id": "depth-anything-v2-metric-vkitti-vits", "model": "depth_anything_v2_metric_vkitti_vits.dav2", "maximumCpuRelativeDeviation": 0.000435432, "passed": true},
+    {"id": "depth-anything-v2-metric-hypersim-vitb", "model": "depth_anything_v2_metric_hypersim_vitb.dav2", "maximumCpuRelativeDeviation": 0.0028198, "passed": true},
+    {"id": "depth-anything-v2-metric-vkitti-vitb", "model": "depth_anything_v2_metric_vkitti_vitb.dav2", "maximumCpuRelativeDeviation": 0.0014954, "passed": true},
+    {"id": "depth-anything-v2-metric-hypersim-vitl", "model": "depth_anything_v2_metric_hypersim_vitl.dav2", "maximumCpuRelativeDeviation": 0.00338542, "passed": true},
+    {"id": "depth-anything-v2-metric-vkitti-vitl", "model": "depth_anything_v2_metric_vkitti_vitl.dav2", "maximumCpuRelativeDeviation": 0.00096863, "passed": true}
+  ]
+}

@@ -105,14 +105,15 @@ the caller owns preprocessing. See
 [`include/depth_anything_v2.h`](include/depth_anything_v2.h) and
 [`docs/architecture.md`](docs/architecture.md) for the full contract.
 
-The same DLL exports InferBridge harness ABI 1.6. Its embedded adapter
-implements the current Depth Anything V2 worker contract exactly: BGRA host
-input, the worker's transposed legacy-nearest resize, BGR channel order,
-ImageNet normalization, and min/max-normalized float32 depth at the processed
-dimensions. The harness currently advertises host-memory resources only.
-Although the standalone DAV2 API retains its proven D3D12/Vulkan texture
-path, that path uses the official RGB/cubic/source-size contract and is not
-falsely exposed as an equivalent InferBridge GPU-resource capability.
+The same DLL exports InferBridge harness ABI 1.6. Host BGRA input preserves
+the current worker compatibility contract (legacy-nearest processed shape,
+BGR channel order, ImageNet normalization, and relative-depth normalization).
+On Windows, the same harness also accepts a shared D3D12 BGRA texture and
+producer fence, runs the official DAV2 preprocessing and full graph in
+Vulkan, and leases a shared D3D12 `R32_FLOAT` source-size texture plus signal
+fence. The three-slot lease pool permits two retained sampling outputs while
+the next frame runs. Unsupported platforms or devices fail the GPU request;
+there is no hidden host fallback.
 
 The embedded harness keeps attention scores in FP32, the operation shown by
 the cross-device validation matrix to dominate normalized-output drift, while
