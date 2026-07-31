@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace {
@@ -29,11 +30,13 @@ float cubic2(float x) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     static constexpr char crc_text[] = "123456789";
     assert(dav2::crc32(crc_text, 9) == 0xcbf43926u);
 
-    dav2::VulkanContext context(0);
+    const std::uint32_t device_index =
+        argc > 1 ? static_cast<std::uint32_t>(std::stoul(argv[1])) : 0u;
+    dav2::VulkanContext context(device_index);
     const std::vector<float> input{
         -4.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 7.0f, 12.0f,
     };
@@ -81,6 +84,103 @@ int main() {
     }
 
     dav2::VulkanOperators operators(context);
+    {
+        constexpr std::uint32_t input_width = 11;
+        constexpr std::uint32_t input_height = 9;
+        constexpr std::uint32_t input_channels = 5;
+        constexpr std::uint32_t output_channels = 9;
+        constexpr std::uint32_t output_width = 6;
+        constexpr std::uint32_t output_height = 5;
+        std::vector<float> conv_input(
+            input_width * input_height * input_channels);
+        std::vector<float> conv_weight(
+            output_channels * input_channels * 9);
+        std::vector<float> conv_bias(output_channels);
+        for (std::size_t index = 0; index < conv_input.size(); ++index) {
+            conv_input[index] =
+                (static_cast<int>(index % 17) - 8) * 0.03125f;
+        }
+        for (std::size_t index = 0; index < conv_weight.size(); ++index) {
+            conv_weight[index] =
+                (static_cast<int>(index % 13) - 6) * 0.015625f;
+        }
+        for (std::size_t index = 0; index < conv_bias.size(); ++index) {
+            conv_bias[index] =
+                (static_cast<int>(index) - 4) * 0.0078125f;
+        }
+        auto gpu_conv_input =
+            context.create_device_buffer(conv_input.size() * sizeof(float));
+        auto gpu_conv_weight =
+            context.create_device_buffer(conv_weight.size() * sizeof(float));
+        auto gpu_conv_bias =
+            context.create_device_buffer(conv_bias.size() * sizeof(float));
+        auto gpu_conv_output = context.create_device_buffer(
+            output_width * output_height * output_channels * sizeof(float));
+        context.upload(
+            gpu_conv_input, conv_input.data(),
+            conv_input.size() * sizeof(float));
+        context.upload(
+            gpu_conv_weight, conv_weight.data(),
+            conv_weight.size() * sizeof(float));
+        context.upload(
+            gpu_conv_bias, conv_bias.data(),
+            conv_bias.size() * sizeof(float));
+        operators.conv2d(
+            gpu_conv_output, gpu_conv_input, gpu_conv_weight, gpu_conv_bias,
+            input_width, input_height, input_channels, output_channels,
+            3, 2, 1, true, false, false, false, true);
+        std::vector<float> conv_output(
+            output_width * output_height * output_channels);
+        context.download(
+            gpu_conv_output, conv_output.data(),
+            conv_output.size() * sizeof(float));
+        for (std::uint32_t output_channel = 0;
+             output_channel < output_channels; ++output_channel) {
+            for (std::uint32_t output_y = 0;
+                 output_y < output_height; ++output_y) {
+                for (std::uint32_t output_x = 0;
+                     output_x < output_width; ++output_x) {
+                    float expected = conv_bias[output_channel];
+                    for (std::uint32_t input_channel = 0;
+                         input_channel < input_channels; ++input_channel) {
+                        for (std::uint32_t kernel_y = 0;
+                             kernel_y < 3; ++kernel_y) {
+                            for (std::uint32_t kernel_x = 0;
+                                 kernel_x < 3; ++kernel_x) {
+                                const int input_x =
+                                    static_cast<int>(output_x * 2 + kernel_x) -
+                                    1;
+                                const int input_y =
+                                    static_cast<int>(output_y * 2 + kernel_y) -
+                                    1;
+                                if (input_x < 0 || input_y < 0 ||
+                                    input_x >= static_cast<int>(input_width) ||
+                                    input_y >= static_cast<int>(input_height))
+                                    continue;
+                                expected += conv_input[
+                                    (input_channel * input_height +
+                                     static_cast<std::uint32_t>(input_y)) *
+                                        input_width +
+                                    static_cast<std::uint32_t>(input_x)] *
+                                    conv_weight[
+                                        (output_channel * input_channels +
+                                         input_channel) *
+                                            9 +
+                                        kernel_y * 3 + kernel_x];
+                            }
+                        }
+                    }
+                    expect_near(
+                        conv_output[
+                            (output_channel * output_height + output_y) *
+                                output_width +
+                            output_x],
+                        expected,
+                        2.0e-6f);
+                }
+            }
+        }
+    }
     const std::uint32_t rows = 3;
     const std::uint32_t input_columns = 19;
     const std::uint32_t output_columns = 7;

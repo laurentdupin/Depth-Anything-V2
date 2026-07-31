@@ -86,7 +86,8 @@ public:
         bool has_bias,
         bool block8 = false,
         bool half_weight = false,
-        bool tiled = false);
+        bool tiled = false,
+        bool stride2_tiled = true);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -153,6 +154,7 @@ private:
     VulkanPipeline conv2d_;
     VulkanPipeline conv2d_pointwise_gemm_;
     VulkanPipeline conv2d_tiled16x8_;
+    VulkanPipeline conv2d_stride2_tiled8x8_;
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
     VulkanPipeline conv2d8_half_;

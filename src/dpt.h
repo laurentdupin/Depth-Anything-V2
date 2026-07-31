@@ -64,6 +64,7 @@ private:
     bool convolution_block8_ = false;
     bool convolution_half_weight_ = false;
     bool convolution_tiled_ = false;
+    bool stride2_tiled_ = false;
     bool force_fp32_weights_ = false;
 };
 

@@ -170,6 +170,7 @@ def main() -> None:
     parser.add_argument("--device", type=int, required=True)
     parser.add_argument("--size", type=int, default=140)
     parser.add_argument("--create-flags", type=int, default=1)
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     model = load_model(args.encoder, args.checkpoint)
@@ -237,6 +238,16 @@ def main() -> None:
                 else float(difference.max())
             )
             worst_relative_l1 = max(worst_relative_l1, relative_l1)
+            if args.verbose:
+                print(
+                    f"{path.name}: max_abs={float(difference.max()):.8f} "
+                    f"mean_abs={float(difference.mean()):.8f} "
+                    f"relative_l1={100.0 * relative_l1:.4f}% "
+                    f"native=[{float(native.min()):.6f},"
+                    f"{float(native.max()):.6f}] "
+                    f"cpu=[{float(expected.min()):.6f},"
+                    f"{float(expected.max()):.6f}]"
+                )
     finally:
         dll.dav2_destroy(context)
 

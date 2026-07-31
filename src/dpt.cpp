@@ -261,6 +261,82 @@ void DptHead::select_convolution_block(
     std::sort(tiled_samples.begin(), tiled_samples.end());
     convolution_tiled_ =
         tiled_samples[1] < direct_samples[1] * 0.95;
+    if (!convolution_half_weight_ &&
+        project_channels_[3] <= 384) {
+        const std::uint32_t stride_input_width =
+            std::max(1u, patch_width);
+        const std::uint32_t stride_input_height =
+            std::max(1u, patch_height);
+        const std::uint32_t stride_output_width =
+            (stride_input_width + 1) / 2;
+        const std::uint32_t stride_output_height =
+            (stride_input_height + 1) / 2;
+        VulkanBuffer stride_input = context_.create_device_buffer(
+            elements(
+                stride_input_width,
+                stride_input_height,
+                project_channels_[3]) *
+            sizeof(float));
+        VulkanBuffer stride_output = context_.create_device_buffer(
+            elements(
+                stride_output_width,
+                stride_output_height,
+                project_channels_[3]) *
+            sizeof(float));
+        const GpuTensor& stride_weight = weights_.tensor(
+            "depth_head.resize_layers.3.weight");
+        const VulkanBuffer& stride_bias = weight(
+            weights_, "depth_head.resize_layers.3.bias");
+        const auto run_stride2 = [&](bool use_specialized) {
+            const auto start = std::chrono::steady_clock::now();
+            context_.batch([&] {
+                for (int repetition = 0; repetition < 3; ++repetition) {
+                    operators_.conv2d(
+                        stride_output,
+                        stride_input,
+                        stride_weight.buffer,
+                        stride_bias,
+                        stride_input_width,
+                        stride_input_height,
+                        project_channels_[3],
+                        project_channels_[3],
+                        3,
+                        2,
+                        1,
+                        true,
+                        convolution_block8_,
+                        false,
+                        convolution_tiled_,
+                        use_specialized);
+                }
+            });
+            return std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - start).count();
+        };
+        std::array<double, 3> generic_stride_samples{};
+        std::array<double, 3> tiled_stride_samples{};
+        run_stride2(false);
+        run_stride2(true);
+        for (std::size_t sample = 0;
+             sample < generic_stride_samples.size();
+             ++sample) {
+            if ((sample & 1u) == 0) {
+                generic_stride_samples[sample] = run_stride2(false);
+                tiled_stride_samples[sample] = run_stride2(true);
+            } else {
+                tiled_stride_samples[sample] = run_stride2(true);
+                generic_stride_samples[sample] = run_stride2(false);
+            }
+        }
+        std::sort(
+            generic_stride_samples.begin(),
+            generic_stride_samples.end());
+        std::sort(
+            tiled_stride_samples.begin(),
+            tiled_stride_samples.end());
+        stride2_tiled_ =
+            tiled_stride_samples[1] < generic_stride_samples[1] * 0.985;
+    }
     weights_.retain_dpt_precision(convolution_half_weight_);
     convolution_block_selected_ = true;
 }
@@ -313,7 +389,8 @@ FeatureMap DptHead::conv(
         has_bias,
         convolution_block8_,
         convolution_half_weight_,
-        convolution_tiled_);
+        convolution_tiled_,
+        stride2_tiled_);
     return output;
 }
 

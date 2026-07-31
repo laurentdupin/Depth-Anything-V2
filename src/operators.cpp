@@ -11,6 +11,7 @@
 #include "conv2d_spv.h"
 #include "conv2d_pointwise_gemm_spv.h"
 #include "conv2d_tiled16x8_spv.h"
+#include "conv2d_stride2_tiled8x8_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
@@ -193,6 +194,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv2d_tiled16x8_(context.create_pipeline(
           dav2_conv2d_tiled16x8_spv,
           dav2_conv2d_tiled16x8_spv_size, 4, 40)),
+      conv2d_stride2_tiled8x8_(context.create_pipeline(
+          dav2_conv2d_stride2_tiled8x8_spv,
+          dav2_conv2d_stride2_tiled8x8_spv_size, 4, 40)),
       conv2d8_(context.create_pipeline(
           dav2_conv2d8_spv, dav2_conv2d8_spv_size, 4, 40)),
       conv2d_half_(context.create_pipeline(
@@ -277,6 +281,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d_pointwise_gemm_.set_debug_name(
         "conv2d_pointwise_gemm");
     conv2d_tiled16x8_.set_debug_name("conv2d_tiled16x8");
+    conv2d_stride2_tiled8x8_.set_debug_name(
+        "conv2d_stride2_tiled8x8");
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
@@ -721,7 +727,8 @@ void VulkanOperators::conv2d(
     bool has_bias,
     bool block8,
     bool half_weight,
-    bool tiled) {
+    bool tiled,
+    bool allow_stride2_tiled) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0 || stride == 0 ||
         input_width + 2 * padding < kernel ||
@@ -774,9 +781,15 @@ void VulkanOperators::conv2d(
     const bool pointwise =
         !half_weight && kernel == 1 && stride == 1 && padding == 0 &&
         output_width == input_width && output_height == input_height;
+    const bool stride2_tiled =
+        allow_stride2_tiled && !half_weight && kernel == 3 &&
+        stride == 2 && padding == 1 && input_channels <= 384 &&
+        output_channels <= 384;
     VulkanPipeline& pipeline =
         pointwise
         ? conv2d_pointwise_gemm_
+        : stride2_tiled
+        ? conv2d_stride2_tiled8x8_
         : (use_tiled16x8
         ? conv2d_tiled16x8_
         : (use_tiled
@@ -796,6 +809,8 @@ void VulkanOperators::conv2d(
         pointwise ? divide_up(output_channels, 32)
             : divide_up(output_height, 8),
         pointwise ? 1
+            : stride2_tiled
+                ? divide_up(output_channels, 8)
             : divide_up(
                 output_channels,
                 (block8 || use_tiled16x8) ? 8 : 4));
