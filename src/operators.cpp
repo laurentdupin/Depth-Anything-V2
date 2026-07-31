@@ -9,6 +9,8 @@
 #include "bmm_score_half_spv.h"
 #include "bmm_value_half_spv.h"
 #include "conv2d_spv.h"
+#include "conv2d_pointwise_gemm_spv.h"
+#include "conv2d_tiled16x8_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
@@ -185,6 +187,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           16)),
       conv2d_(context.create_pipeline(
           dav2_conv2d_spv, dav2_conv2d_spv_size, 4, 40)),
+      conv2d_pointwise_gemm_(context.create_pipeline(
+          dav2_conv2d_pointwise_gemm_spv,
+          dav2_conv2d_pointwise_gemm_spv_size, 4, 40)),
+      conv2d_tiled16x8_(context.create_pipeline(
+          dav2_conv2d_tiled16x8_spv,
+          dav2_conv2d_tiled16x8_spv_size, 4, 40)),
       conv2d8_(context.create_pipeline(
           dav2_conv2d8_spv, dav2_conv2d8_spv_size, 4, 40)),
       conv2d_half_(context.create_pipeline(
@@ -266,6 +274,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     project_tokens_half_.set_debug_name(
         "project_tokens_half");
     conv2d_.set_debug_name("conv2d");
+    conv2d_pointwise_gemm_.set_debug_name(
+        "conv2d_pointwise_gemm");
+    conv2d_tiled16x8_.set_debug_name("conv2d_tiled16x8");
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
@@ -331,8 +342,8 @@ void VulkanOperators::linear(
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(divide_up(output_columns, 4), 8),
-        divide_up(divide_up(rows, 4), 8));
+        divide_up(divide_up(output_columns, 4), 16),
+        divide_up(divide_up(rows, 7), 8));
     if (gelu) {
         struct GeluParameters {
             std::uint32_t count;
@@ -758,22 +769,36 @@ void VulkanOperators::conv2d(
     const bool use_tiled =
         tiled && kernel == 3 && stride == 1 && padding == 1 &&
         output_width == input_width && output_height == input_height;
+    const bool use_tiled16x8 =
+        use_tiled && !half_weight && !block8;
+    const bool pointwise =
+        !half_weight && kernel == 1 && stride == 1 && padding == 0 &&
+        output_width == input_width && output_height == input_height;
     VulkanPipeline& pipeline =
-        use_tiled
+        pointwise
+        ? conv2d_pointwise_gemm_
+        : (use_tiled16x8
+        ? conv2d_tiled16x8_
+        : (use_tiled
         ? (half_weight
             ? (block8 ? conv2d8_tiled_half_ : conv2d_tiled_half_)
             : (block8 ? conv2d8_tiled_ : conv2d_tiled_))
         : (half_weight
             ? (block8 ? conv2d8_half_ : conv2d_half_)
-            : (block8 ? conv2d8_ : conv2d_));
+            : (block8 ? conv2d8_ : conv2d_))));
     context_.dispatch(
         pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        divide_up(output_channels, block8 ? 8 : 4));
+        pointwise ? divide_up(output_width * output_height, 32)
+            : divide_up(output_width, use_tiled16x8 ? 16 : 8),
+        pointwise ? divide_up(output_channels, 32)
+            : divide_up(output_height, 8),
+        pointwise ? 1
+            : divide_up(
+                output_channels,
+                (block8 || use_tiled16x8) ? 8 : 4));
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(
