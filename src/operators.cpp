@@ -35,6 +35,7 @@
 #include "linear_vec8_half_residual_spv.h"
 #include "linear_vec16_spv.h"
 #include "linear_vec16_half_spv.h"
+#include "linear_vec16_gelu_spv.h"
 #include "linear_vec16_residual_spv.h"
 #include "linear_vec16_half_residual_spv.h"
 #include "prepare_tokens_spv.h"
@@ -133,6 +134,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       linear_vec16_half_(context.create_pipeline(
           dav2_linear_vec16_half_spv,
           dav2_linear_vec16_half_spv_size,
+          4,
+          12)),
+      linear_vec16_gelu_(context.create_pipeline(
+          dav2_linear_vec16_gelu_spv,
+          dav2_linear_vec16_gelu_spv_size,
           4,
           12)),
       linear_vec16_residual_(context.create_pipeline(
@@ -288,6 +294,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "linear_vec8_half_residual");
     linear_vec16_.set_debug_name("linear_vec16");
     linear_vec16_half_.set_debug_name("linear_vec16_half");
+    linear_vec16_gelu_.set_debug_name("linear_vec16_gelu");
     linear_vec16_residual_.set_debug_name("linear_vec16_residual");
     linear_vec16_half_residual_.set_debug_name(
         "linear_vec16_half_residual");
@@ -363,7 +370,11 @@ void VulkanOperators::linear(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
-    VulkanPipeline& pipeline =
+    const bool fused_gelu =
+        gelu && vectorized && vector_tile == 16 && !half_weight;
+    VulkanPipeline& pipeline = fused_gelu
+        ? linear_vec16_gelu_
+        :
         vectorized
         ? (vector_tile == 16
             ? (half_weight ? linear_vec16_half_ : linear_vec16_)
@@ -388,7 +399,7 @@ void VulkanOperators::linear(
         sizeof(parameters),
         groups_x,
         groups_y);
-    if (gelu) {
+    if (gelu && !fused_gelu) {
         struct GeluParameters {
             std::uint32_t count;
         } gelu_parameters{rows * output_columns};

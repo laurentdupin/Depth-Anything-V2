@@ -52,6 +52,24 @@ layout(push_constant) uniform Parameters {
     uint output_columns;
 } parameters;
 
+#if defined(FUSED_GELU)
+float exact_gelu(float value) {
+    const float x = value * 0.7071067811865475;
+    const float magnitude = abs(x);
+    const float t = 1.0 / (1.0 + 0.5 * magnitude);
+    const float polynomial =
+        -1.26551223 + t * (1.00002368 + t * (0.37409196 +
+        t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 +
+        t * (-1.13520398 + t * (1.48851587 +
+        t * (-0.82215223 + t * 0.17087277))))))));
+    const float erfc_magnitude =
+        t * exp(-magnitude * magnitude + polynomial);
+    const float erf_value =
+        x >= 0.0 ? 1.0 - erfc_magnitude : erfc_magnitude - 1.0;
+    return 0.5 * value * (1.0 + erf_value);
+}
+#endif
+
 #ifndef K_VECTORS
 #define K_VECTORS 4
 #endif
@@ -146,6 +164,9 @@ void main() {
             if (output_column < parameters.output_columns) {
                 float value =
                     sums[row][column] + bias_buffer.data[output_column];
+#if defined(FUSED_GELU)
+                value = exact_gelu(value);
+#endif
 #if defined(FUSED_RESIDUAL)
                 value =
                     residual_buffer.data[

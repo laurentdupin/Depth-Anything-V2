@@ -152,6 +152,7 @@ private:
     VulkanPipeline linear_vec8_half_residual_;
     VulkanPipeline linear_vec16_;
     VulkanPipeline linear_vec16_half_;
+    VulkanPipeline linear_vec16_gelu_;
     VulkanPipeline linear_vec16_residual_;
     VulkanPipeline linear_vec16_half_residual_;
     VulkanPipeline gelu_;
