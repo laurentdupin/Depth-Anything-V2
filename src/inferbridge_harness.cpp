@@ -20,6 +20,7 @@ struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     dav2_context* context = nullptr;
     uint32_t input_size = 280u;
+    bool metric = false;
     std::mutex submit_mutex;
 };
 
@@ -29,6 +30,7 @@ struct ibrh_job {
     uint64_t timestamp_ns = 0u;
     uint32_t width = 0u;
     uint32_t height = 0u;
+    bool metric = false;
     std::vector<float> depth;
 };
 
@@ -284,6 +286,19 @@ ibrh_result IBRH_CALL model_load(
         delete model;
         return fail(runtime, status_result(status), message);
     }
+    dav2_model_info info{};
+    info.struct_size = sizeof(info);
+    const dav2_status info_status =
+        dav2_get_model_info(model->context, &info);
+    if (info_status != DAV2_STATUS_OK) {
+        const std::string message =
+            std::string("DAV2 model metadata query failed: ") +
+            dav2_last_error();
+        dav2_destroy(model->context);
+        delete model;
+        return fail(runtime, status_result(info_status), message);
+    }
+    model->metric = info.is_metric != 0u;
     *output = model;
     return IBRH_OK;
 }
@@ -347,6 +362,7 @@ ibrh_result IBRH_CALL submit(
     job->timestamp_ns = request->timestamp_ns;
     job->width = static_cast<uint32_t>(shape.width);
     job->height = static_cast<uint32_t>(shape.height);
+    job->metric = model->metric;
     try {
         job->depth.resize(
             static_cast<size_t>(job->width) * job->height);
@@ -415,7 +431,9 @@ ibrh_result IBRH_CALL output_acquire(
     descriptor->struct_size = sizeof(*descriptor);
     descriptor->api_version = IBRH_CURRENT_API_VERSION;
     descriptor->output_index = 0u;
-    descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
+    descriptor->payload_type = job->metric ?
+        IBRH_PIXEL_DEPTH_METRIC_FLOAT32 :
+        IBRH_PIXEL_DEPTH_FLOAT32;
     descriptor->source_frame_id = job->source_frame_id;
     descriptor->timestamp_ns = job->timestamp_ns;
     descriptor->resource.struct_size = sizeof(descriptor->resource);
@@ -423,7 +441,9 @@ ibrh_result IBRH_CALL output_acquire(
     descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_HOST;
     descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
     descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
-    descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
+    descriptor->resource.pixel_format = job->metric ?
+        IBRH_PIXEL_DEPTH_METRIC_FLOAT32 :
+        IBRH_PIXEL_DEPTH_FLOAT32;
     descriptor->resource.width = job->width;
     descriptor->resource.height = job->height;
     descriptor->resource.depth = 1u;

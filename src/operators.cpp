@@ -43,6 +43,7 @@
 #include "project_tokens_spv.h"
 #include "project_tokens_half_spv.h"
 #include "relu_spv.h"
+#include "sigmoid_scale_spv.h"
 #include "softmax_lastdim_spv.h"
 #include "softmax_lastdim_half_spv.h"
 
@@ -280,7 +281,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           },
           16)),
       relu_(context.create_pipeline(
-          dav2_relu_spv, dav2_relu_spv_size, 2, 4)) {
+          dav2_relu_spv, dav2_relu_spv_size, 2, 4)),
+      sigmoid_scale_(context.create_pipeline(
+          dav2_sigmoid_scale_spv,
+          dav2_sigmoid_scale_spv_size, 2, 8)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -336,6 +340,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     bilinear_align_true_image_.set_debug_name(
         "bilinear_align_true_image");
     relu_.set_debug_name("relu");
+    sigmoid_scale_.set_debug_name("sigmoid_scale");
 }
 
 void VulkanOperators::linear(
@@ -1061,6 +1066,22 @@ void VulkanOperators::relu(
     context_.dispatch(
         relu_, {&output, &input}, &count, sizeof(count),
         divide_up(count, 256));
+}
+
+void VulkanOperators::sigmoid_scale(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    std::uint32_t count,
+    float scale) {
+    require_bytes(output, count, "sigmoid output");
+    require_bytes(input, count, "sigmoid input");
+    struct Parameters {
+        std::uint32_t count;
+        float scale;
+    } parameters{count, scale};
+    context_.dispatch(
+        sigmoid_scale_, {&output, &input},
+        &parameters, sizeof(parameters), divide_up(count, 256));
 }
 
 void VulkanOperators::add(

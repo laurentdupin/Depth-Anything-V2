@@ -97,6 +97,8 @@ public:
     virtual void transfer_counters(
         std::uint64_t& upload_bytes,
         std::uint64_t& download_bytes) const = 0;
+    virtual dav2_encoder encoder() const = 0;
+    virtual float metric_max_depth() const = 0;
 };
 
 std::unique_ptr<Executor> create_executor(

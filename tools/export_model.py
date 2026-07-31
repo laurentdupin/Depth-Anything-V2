@@ -28,7 +28,13 @@ ALIGNMENT = 64
 ENCODERS = {"vits": 0, "vitb": 1, "vitl": 2}
 METADATA_MAGIC = b"DAV2META"
 METADATA_VERSION = 1
-CONVERTER_ID = "dav2-export-pytorch-v1"
+RELATIVE_CONVERTER_ID = "dav2-export-pytorch-v1"
+METRIC_CONVERTER_ID = "dav2-export-pytorch-metric-v1"
+DEPTH_MODES = {
+    "relative": (0, 0.0),
+    "metric-hypersim": (1, 20.0),
+    "metric-vkitti": (1, 80.0),
+}
 METADATA = struct.Struct("<8sIIIIII32s64s")
 
 
@@ -53,11 +59,16 @@ def sha256_file(path: Path) -> bytes:
 
 
 def derivation_metadata(
-    canonical_sha256: bytes, encoder: str
+    canonical_sha256: bytes, encoder: str, depth_mode: str
 ) -> tuple[bytes, str]:
     if len(canonical_sha256) != 32:
         raise ValueError("canonical SHA-256 must contain 32 bytes")
-    converter_id = CONVERTER_ID.encode("ascii")
+    flags, max_depth = DEPTH_MODES[depth_mode]
+    converter = (
+        RELATIVE_CONVERTER_ID if depth_mode == "relative"
+        else METRIC_CONVERTER_ID
+    )
+    converter_id = converter.encode("ascii")
     if len(converter_id) >= 64:
         raise RuntimeError("converter ID is too long")
     metadata = METADATA.pack(
@@ -66,15 +77,16 @@ def derivation_metadata(
         METADATA.size,
         FORMAT_VERSION,
         ENCODERS[encoder],
-        0,
-        0,
+        flags,
+        struct.unpack("<I", struct.pack("<f", max_depth))[0],
         canonical_sha256,
         converter_id,
     )
     cache_key = (
         f"dav2:{canonical_sha256.hex()}:"
-        f"converter={CONVERTER_ID}:"
-        f"format={FORMAT_VERSION}:encoder={encoder}"
+        f"converter={converter}:"
+        f"format={FORMAT_VERSION}:encoder={encoder}:"
+        f"depth_mode={depth_mode}:max_depth={max_depth:g}"
     )
     return metadata, cache_key
 
@@ -86,6 +98,9 @@ def main() -> None:
     parser.add_argument("--encoder", choices=ENCODERS, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--depth-mode", choices=DEPTH_MODES,
+        default="relative")
     args = parser.parse_args()
     if not args.checkpoint.is_file():
         parser.error(f"checkpoint does not exist: {args.checkpoint}")
@@ -161,7 +176,7 @@ def main() -> None:
         metadata_offset,
     )
     metadata, cache_key = derivation_metadata(
-        canonical_sha256, args.encoder)
+        canonical_sha256, args.encoder, args.depth_mode)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("wb") as output:
@@ -196,9 +211,15 @@ def main() -> None:
                 "output": str(args.output.resolve()),
                 "derivation": {
                     "canonical_sha256": canonical_sha256.hex(),
-                    "converter": CONVERTER_ID,
+                    "converter": (
+                        RELATIVE_CONVERTER_ID
+                        if args.depth_mode == "relative"
+                        else METRIC_CONVERTER_ID
+                    ),
                     "format_version": FORMAT_VERSION,
                     "encoder": args.encoder,
+                    "depth_mode": args.depth_mode,
+                    "metric_max_depth": DEPTH_MODES[args.depth_mode][1],
                     "cache_key": cache_key,
                 },
             },

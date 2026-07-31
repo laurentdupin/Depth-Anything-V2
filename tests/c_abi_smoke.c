@@ -24,6 +24,11 @@ int main(void) {
         dav2_get_network_shape(0, 480, 518, &shape) ==
         DAV2_STATUS_INVALID_ARGUMENT);
     assert(strlen(dav2_last_error()) != 0);
+    dav2_model_info model_info = {0};
+    model_info.struct_size = sizeof(model_info);
+    assert(
+        dav2_get_model_info(NULL, &model_info) ==
+        DAV2_STATUS_INVALID_ARGUMENT);
     dav2_gpu_capabilities capabilities = {0};
     capabilities.struct_size = sizeof(capabilities);
     assert(

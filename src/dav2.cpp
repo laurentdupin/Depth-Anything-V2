@@ -213,6 +213,27 @@ void DAV2_CALL dav2_destroy(dav2_context* context) {
     delete context;
 }
 
+dav2_status DAV2_CALL dav2_get_model_info(
+    const dav2_context* context,
+    dav2_model_info* info) {
+    if (context == nullptr || info == nullptr ||
+        info->struct_size < sizeof(*info)) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "invalid model info query");
+    }
+    return protect([&] {
+        const float max_depth =
+            context->executor->metric_max_depth();
+        *info = {};
+        info->struct_size = sizeof(*info);
+        info->abi_version = DAV2_ABI_VERSION;
+        info->encoder = context->executor->encoder();
+        info->is_metric = max_depth > 0.0f ? 1u : 0u;
+        info->metric_max_depth = max_depth;
+    });
+}
+
 dav2_status DAV2_CALL dav2_probe_gpu_capabilities(
     int32_t vulkan_device_index,
     dav2_gpu_capabilities* capabilities) {
@@ -664,6 +685,12 @@ dav2_status DAV2_CALL dav2_inferbridge_bgra8_f32(
             output_shape.width,
             output_shape.height,
             context->image_output.data());
+        if (context->executor->metric_max_depth() > 0.0f) {
+            std::copy(
+                context->image_output.begin(),
+                context->image_output.end(), output_depth);
+            return;
+        }
         const auto bounds = std::minmax_element(
             context->image_output.begin(), context->image_output.end());
         const float minimum = *bounds.first;

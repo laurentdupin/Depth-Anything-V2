@@ -29,12 +29,14 @@ DptHead::DptHead(
     VulkanContext& context,
     GpuModel& weights,
     VulkanOperators& operators,
-    bool force_fp32_weights)
+    bool force_fp32_weights,
+    float metric_max_depth)
     : context_(context),
       weights_(weights),
       operators_(operators),
       zero_bias_(context.create_device_buffer(sizeof(float))),
-      force_fp32_weights_(force_fp32_weights) {
+      force_fp32_weights_(force_fp32_weights),
+      metric_max_depth_(metric_max_depth) {
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
     switch (encoder) {
@@ -673,10 +675,17 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             1,
             0,
             true);
-        operators_.relu(
-            depth.buffer,
-            depth.buffer,
-            depth.width * depth.height);
+        if (metric_max_depth_ > 0.0f) {
+            operators_.sigmoid_scale(
+                depth.buffer, depth.buffer,
+                depth.width * depth.height,
+                metric_max_depth_);
+        } else {
+            operators_.relu(
+                depth.buffer,
+                depth.buffer,
+                depth.width * depth.height);
+        }
     });
     };
     if (encoded.tokens > 2000) {

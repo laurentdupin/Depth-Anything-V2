@@ -93,7 +93,9 @@ def configure_dll(path: Path):
     return dll
 
 
-def load_model(encoder: str, checkpoint: Path) -> DepthAnythingV2:
+def load_model(
+    encoder: str, checkpoint: Path, metric_max_depth: float
+) -> DepthAnythingV2:
     _, features, channels = CONFIGS[encoder]
     model = DepthAnythingV2(
         encoder=encoder, features=features, out_channels=channels
@@ -130,11 +132,14 @@ def load_model(encoder: str, checkpoint: Path) -> DepthAnythingV2:
         raise RuntimeError(
             f"checkpoint mismatch: missing={missing}, unexpected={unexpected}"
         )
+    if metric_max_depth > 0.0:
+        model.depth_head.scratch.output_conv2[3] = torch.nn.Sigmoid()
     return model.eval()
 
 
 def reference(
-    model: DepthAnythingV2, bgra: np.ndarray, size: int
+    model: DepthAnythingV2, bgra: np.ndarray, size: int,
+    metric_max_depth: float
 ) -> np.ndarray:
     resize = Resize(
         width=size,
@@ -156,7 +161,10 @@ def reference(
     image = ((image - mean) / std).permute(2, 0, 1).unsqueeze(0)
     with torch.inference_mode():
         depth = model(image)[0]
-        depth = (depth - depth.min()) / (depth.max() - depth.min())
+        if metric_max_depth > 0.0:
+            depth = depth * metric_max_depth
+        else:
+            depth = (depth - depth.min()) / (depth.max() - depth.min())
     return depth.numpy()
 
 
@@ -170,10 +178,14 @@ def main() -> None:
     parser.add_argument("--device", type=int, required=True)
     parser.add_argument("--size", type=int, default=140)
     parser.add_argument("--create-flags", type=int, default=1)
+    parser.add_argument(
+        "--metric-max-depth", type=float,
+        choices=(20.0, 80.0), default=0.0)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    model = load_model(args.encoder, args.checkpoint)
+    model = load_model(
+        args.encoder, args.checkpoint, args.metric_max_depth)
     dll = configure_dll(args.dll)
     options = CreateOptions(
         ctypes.sizeof(CreateOptions),
@@ -190,9 +202,13 @@ def main() -> None:
     if status != 0:
         raise RuntimeError(dll.dav2_last_error().decode())
 
-    paths = sorted(
-        p for p in args.assets.rglob("*")
-        if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    paths = (
+        [args.assets]
+        if args.assets.is_file()
+        else sorted(
+            p for p in args.assets.rglob("*")
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
     )
     worst_max = 0.0
     worst_mean = 0.0
@@ -223,7 +239,8 @@ def main() -> None:
             )
             if status != 0:
                 raise RuntimeError(dll.dav2_last_error().decode())
-            expected = reference(model, bgra, args.size)
+            expected = reference(
+                model, bgra, args.size, args.metric_max_depth)
             if native.shape != expected.shape:
                 raise RuntimeError(
                     f"{path}: shape {native.shape} != {expected.shape}"

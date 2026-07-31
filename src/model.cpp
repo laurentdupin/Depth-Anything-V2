@@ -211,8 +211,7 @@ ModelFile::ModelFile(
                 metadata.model_format_version !=
                     format_version ||
                 metadata.encoder != header.encoder ||
-                metadata.flags != 0 ||
-                metadata.reserved != 0 ||
+                (metadata.flags & ~1u) != 0 ||
                 std::memchr(
                     metadata.converter,
                     '\0',
@@ -230,6 +229,29 @@ ModelFile::ModelFile(
                 metadata.model_format_version;
             derivation_.encoder =
                 static_cast<dav2_encoder>(metadata.encoder);
+            if ((metadata.flags & 1u) != 0u) {
+                if (derivation_.converter !=
+                    "dav2-export-pytorch-metric-v1") {
+                    throw std::runtime_error(
+                        "invalid DAV2 metric converter identity");
+                }
+                float max_depth = 0.0f;
+                std::memcpy(
+                    &max_depth, &metadata.reserved,
+                    sizeof(max_depth));
+                if (max_depth != 20.0f && max_depth != 80.0f) {
+                    throw std::runtime_error(
+                        "invalid DAV2 metric maximum depth");
+                }
+                derivation_.metric_max_depth = max_depth;
+            } else if (metadata.reserved != 0u) {
+                throw std::runtime_error(
+                    "invalid DAV2 relative derivation metadata");
+            } else if (derivation_.converter !=
+                "dav2-export-pytorch-v1") {
+                throw std::runtime_error(
+                    "invalid DAV2 relative converter identity");
+            }
         }
 
         tensors_.reserve(header.tensor_count);

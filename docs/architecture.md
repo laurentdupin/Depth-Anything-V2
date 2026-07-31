@@ -152,6 +152,16 @@ offset, and older readers ignore the new offset and padding. The official
 PyTorch checkpoint remains the canonical artifact; `.dav2` is a derived,
 content-addressed representation rather than a second model identity.
 
+Metric exports use `dav2-export-pytorch-metric-v1` and extend that cache
+identity with the depth mode and maximum depth. Their validated derivation
+metadata binds the official checkpoint to either HyperSim (`20` metres) or
+VKITTI (`80` metres). The graph reads this metadata directly: relative models
+retain the ReLU head, while metric models execute `sigmoid(logit) * max_depth`
+in FP32. Caller parameters cannot change a container's output semantics.
+`dav2_get_model_info` exposes the validated semantic type to harnesses so
+metric outputs are leased as `DEPTH_METRIC_FLOAT32` without min/max preview
+normalization.
+
 ## External GPU inference
 
 The internal Windows Vulkan layer probes external D3D12 resource and fence

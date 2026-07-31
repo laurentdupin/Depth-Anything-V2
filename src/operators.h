@@ -131,6 +131,9 @@ public:
         std::uint32_t output_height);
 
     void relu(VulkanBuffer& output, const VulkanBuffer& input, std::uint32_t count);
+    void sigmoid_scale(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t count, float scale);
 
     void add(
         VulkanBuffer& output,
@@ -185,6 +188,7 @@ private:
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline relu_;
+    VulkanPipeline sigmoid_scale_;
 };
 
 }  // namespace dav2

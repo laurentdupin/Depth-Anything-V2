@@ -501,7 +501,8 @@ public:
           dpt_(
               encoder, context_, weights_, operators_,
               (flags & (DAV2_CREATE_FORCE_FP32 |
-                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0)
+                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0,
+              model_.derivation().metric_max_depth)
 #if defined(_WIN32)
           , d3d12_device_(
               matching_d3d12_device(context_.adapter_luid())),
@@ -840,6 +841,14 @@ public:
         std::uint64_t& upload_bytes,
         std::uint64_t& download_bytes) const override {
         context_.transfer_counters(upload_bytes, download_bytes);
+    }
+
+    dav2_encoder encoder() const override {
+        return model_.derivation().encoder;
+    }
+
+    float metric_max_depth() const override {
+        return model_.derivation().metric_max_depth;
     }
 
 private:

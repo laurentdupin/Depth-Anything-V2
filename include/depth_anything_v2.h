@@ -66,6 +66,15 @@ enum {
     DAV2_CREATE_FORCE_FP32_ATTENTION = 1u << 2u
 };
 
+typedef struct dav2_model_info {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    dav2_encoder encoder;
+    uint32_t is_metric;
+    float metric_max_depth;
+    uint32_t reserved[3];
+} dav2_model_info;
+
 typedef struct dav2_image_shape {
     int32_t width;
     int32_t height;
@@ -235,6 +244,10 @@ DAV2_API dav2_status DAV2_CALL dav2_create(
     const char* model_path_utf8,
     const dav2_create_options* options,
     dav2_context** context);
+
+DAV2_API dav2_status DAV2_CALL dav2_get_model_info(
+    const dav2_context* context,
+    dav2_model_info* info);
 
 DAV2_API void DAV2_CALL dav2_destroy(dav2_context* context);
 

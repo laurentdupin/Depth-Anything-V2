@@ -62,7 +62,8 @@ static_assert(sizeof(DerivationMetadata) == 128);
 
 void write_fixture(
     const std::filesystem::path& path,
-    bool include_metadata) {
+    bool include_metadata,
+    float metric_max_depth = 0.0f) {
     constexpr std::uint64_t directory_offset = sizeof(FileHeader);
     constexpr std::uint64_t directory_bytes = sizeof(TensorRecord);
     constexpr std::uint64_t metadata_offset =
@@ -107,6 +108,13 @@ void write_fixture(
         metadata.bytes = sizeof(metadata);
         metadata.model_format_version = 1;
         metadata.encoder = DAV2_ENCODER_VITS;
+        if (metric_max_depth != 0.0f) {
+            metadata.flags = 1u;
+            std::memcpy(
+                &metadata.reserved,
+                &metric_max_depth,
+                sizeof(metric_max_depth));
+        }
         for (std::size_t index = 0;
              index < sizeof(metadata.canonical_sha256);
              ++index) {
@@ -115,8 +123,12 @@ void write_fixture(
         }
         std::memcpy(
             metadata.converter,
-            "dav2-export-pytorch-v1",
-            sizeof("dav2-export-pytorch-v1"));
+            metric_max_depth == 0.0f ?
+                "dav2-export-pytorch-v1" :
+                "dav2-export-pytorch-metric-v1",
+            metric_max_depth == 0.0f ?
+                sizeof("dav2-export-pytorch-v1") :
+                sizeof("dav2-export-pytorch-metric-v1"));
         std::memcpy(
             bytes.data() + metadata_offset,
             &metadata,
@@ -143,6 +155,10 @@ int main() {
         root / (prefix + "-derived.dav2");
     const std::filesystem::path legacy =
         root / (prefix + "-legacy.dav2");
+    const std::filesystem::path metric =
+        root / (prefix + "-metric.dav2");
+    const std::filesystem::path invalid_metric =
+        root / (prefix + "-invalid-metric.dav2");
     try {
         write_fixture(derived, true);
         dav2::ModelFile derived_model(
@@ -161,6 +177,22 @@ int main() {
                     .canonical_sha256[index] == index);
         }
         assert(derived_model.tensor("weight").data[0] == 42.0f);
+        assert(derived_model.derivation().metric_max_depth == 0.0f);
+
+        write_fixture(metric, true, 20.0f);
+        dav2::ModelFile metric_model(
+            metric.u8string(), DAV2_ENCODER_VITS);
+        assert(metric_model.derivation().metric_max_depth == 20.0f);
+
+        write_fixture(invalid_metric, true, 40.0f);
+        bool rejected = false;
+        try {
+            dav2::ModelFile invalid_model(
+                invalid_metric.u8string(), DAV2_ENCODER_VITS);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        assert(rejected);
 
         write_fixture(legacy, false);
         dav2::ModelFile legacy_model(
@@ -170,9 +202,13 @@ int main() {
     } catch (...) {
         std::filesystem::remove(derived);
         std::filesystem::remove(legacy);
+        std::filesystem::remove(metric);
+        std::filesystem::remove(invalid_metric);
         throw;
     }
     std::filesystem::remove(derived);
     std::filesystem::remove(legacy);
+    std::filesystem::remove(metric);
+    std::filesystem::remove(invalid_metric);
     return 0;
 }

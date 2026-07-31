@@ -32,6 +32,7 @@ struct ModelDerivation {
     std::string converter;
     std::uint32_t format_version = 0;
     dav2_encoder encoder = DAV2_ENCODER_VITS;
+    float metric_max_depth = 0.0f;
 };
 
 class ModelFile {

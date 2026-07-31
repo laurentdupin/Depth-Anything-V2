@@ -24,7 +24,8 @@ public:
         VulkanContext& context,
         GpuModel& weights,
         VulkanOperators& operators,
-        bool force_fp32_weights);
+        bool force_fp32_weights,
+        float metric_max_depth);
 
     void prepare(
         std::uint32_t patch_width,
@@ -70,6 +71,7 @@ private:
     bool convolution_tiled_ = false;
     bool stride2_tiled_ = false;
     bool force_fp32_weights_ = false;
+    float metric_max_depth_ = 0.0f;
 };
 
 }  // namespace dav2
