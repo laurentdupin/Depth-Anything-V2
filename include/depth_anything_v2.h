@@ -161,6 +161,18 @@ typedef struct dav2_d3d12_texture_submit_request {
     uint64_t timestamp_ns;
 } dav2_d3d12_texture_submit_request;
 
+typedef struct dav2_d3d12_texture_binding_request {
+    uint32_t struct_size; uint32_t abi_version;
+    uint64_t input_texture_handle;
+    uint32_t input_width; uint32_t input_height; uint32_t input_pixel_format;
+    int32_t input_size;
+    uint64_t wait_fence_handle; uint64_t wait_fence_value;
+    uint64_t output_texture_handle;
+    uint32_t output_width; uint32_t output_height;
+    uint64_t signal_fence_handle; uint64_t signal_fence_value;
+    uint64_t source_frame_id; uint64_t timestamp_ns;
+} dav2_d3d12_texture_binding_request;
+
 typedef struct dav2_gpu_job_status {
     uint32_t struct_size;
     uint32_t state;
@@ -271,6 +283,11 @@ DAV2_API dav2_status DAV2_CALL dav2_submit_d3d12(
 DAV2_API dav2_status DAV2_CALL dav2_submit_d3d12_texture(
     dav2_context* context,
     const dav2_d3d12_texture_submit_request* request,
+    dav2_gpu_job** job);
+
+DAV2_API dav2_status DAV2_CALL dav2_submit_d3d12_texture_binding(
+    dav2_context* context,
+    const dav2_d3d12_texture_binding_request* request,
     dav2_gpu_job** job);
 
 DAV2_API dav2_status DAV2_CALL dav2_gpu_job_poll(
