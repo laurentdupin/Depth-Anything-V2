@@ -14,8 +14,9 @@ layout(push_constant) uniform Parameters {
     uint heads;
 } parameters;
 
-shared float query_tile[64 * 16];
-shared float key_tile[32 * 16];
+#define INNER_STRIDE 17
+shared float query_tile[64 * INNER_STRIDE];
+shared float key_tile[32 * INNER_STRIDE];
 
 void main() {
     const uint column_base =
@@ -38,7 +39,7 @@ void main() {
             const uint tile_row = index / 16;
             const uint inner = inner_base + index % 16;
             const uint token = gl_WorkGroupID.y * 64 + tile_row;
-            query_tile[index] =
+            query_tile[tile_row * INNER_STRIDE + index % 16] =
                 head < parameters.heads && token < parameters.tokens
                 ? qkv_buffer.data[
                     token * embedding * 3 + head * 64 + inner] * 0.125
@@ -48,7 +49,7 @@ void main() {
             const uint tile_column = index / 16;
             const uint inner = inner_base + index % 16;
             const uint token = gl_WorkGroupID.x * 32 + tile_column;
-            key_tile[index] =
+            key_tile[tile_column * INNER_STRIDE + index % 16] =
                 head < parameters.heads && token < parameters.tokens
                 ? qkv_buffer.data[
                     token * embedding * 3 + embedding +
@@ -61,11 +62,13 @@ void main() {
             float key_values[4];
             for (uint row = 0; row < 8; ++row) {
                 query_values[row] = query_tile[
-                    (gl_LocalInvocationID.y * 8 + row) * 16 + inner];
+                    (gl_LocalInvocationID.y * 8 + row) *
+                        INNER_STRIDE + inner];
             }
             for (uint column = 0; column < 4; ++column) {
                 key_values[column] = key_tile[
-                    (gl_LocalInvocationID.x * 4 + column) * 16 + inner];
+                    (gl_LocalInvocationID.x * 4 + column) *
+                        INNER_STRIDE + inner];
             }
             for (uint row = 0; row < 8; ++row) {
                 for (uint column = 0; column < 4; ++column) {

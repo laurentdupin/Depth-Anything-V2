@@ -34,8 +34,9 @@ layout(push_constant) uniform Parameters {
     uint output_channels;
 } parameters;
 
-shared float token_tile[32 * 16];
-shared float weight_tile[32 * 16];
+#define INNER_STRIDE 17
+shared float token_tile[32 * INNER_STRIDE];
+shared float weight_tile[32 * INNER_STRIDE];
 
 void main() {
     const uint spatial = parameters.width * parameters.height;
@@ -60,7 +61,7 @@ void main() {
             const uint inner = inner_base + index % 16;
             const uint output_spatial =
                 gl_WorkGroupID.y * 32 + tile_row;
-            token_tile[index] =
+            token_tile[tile_row * INNER_STRIDE + index % 16] =
                 output_spatial < spatial &&
                     inner < parameters.embedding
                 ? token_buffer.data[
@@ -72,7 +73,7 @@ void main() {
             const uint inner = inner_base + index % 16;
             const uint output_channel =
                 gl_WorkGroupID.x * 32 + tile_column;
-            weight_tile[index] =
+            weight_tile[tile_column * INNER_STRIDE + index % 16] =
                 output_channel < parameters.output_channels &&
                     inner < parameters.embedding
                 ? read_weight(
@@ -87,11 +88,13 @@ void main() {
             float weight_values[4];
             for (uint row = 0; row < 4; ++row) {
                 token_values[row] = token_tile[
-                    (gl_LocalInvocationID.y * 4 + row) * 16 + inner];
+                    (gl_LocalInvocationID.y * 4 + row) *
+                        INNER_STRIDE + inner];
             }
             for (uint column = 0; column < 4; ++column) {
                 weight_values[column] = weight_tile[
-                    (gl_LocalInvocationID.x * 4 + column) * 16 + inner];
+                    (gl_LocalInvocationID.x * 4 + column) *
+                        INNER_STRIDE + inner];
             }
             for (uint row = 0; row < 4; ++row) {
                 for (uint column = 0; column < 4; ++column) {

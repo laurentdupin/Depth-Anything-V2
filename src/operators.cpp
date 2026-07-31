@@ -343,13 +343,21 @@ void VulkanOperators::linear(
         : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
             : (block16 ? linear16_ : linear_));
+    const std::uint32_t groups_x = vectorized
+        ? divide_up(divide_up(output_columns, 4), 16)
+        : divide_up(divide_up(output_columns, 4), 8);
+    const std::uint32_t groups_y = vectorized
+        ? (vector_tile == 16
+            ? divide_up(rows, 64)
+            : divide_up(divide_up(rows, 7), 8))
+        : divide_up(divide_up(rows, 4), 8);
     context_.dispatch(
         pipeline,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(divide_up(output_columns, 4), 16),
-        divide_up(divide_up(rows, 7), 8));
+        groups_x,
+        groups_y);
     if (gelu) {
         struct GeluParameters {
             std::uint32_t count;

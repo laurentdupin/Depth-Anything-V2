@@ -17,8 +17,9 @@ layout(push_constant) uniform Parameters {
     uint heads;
 } parameters;
 
-shared float score_tile[64 * 16];
-shared float value_tile[32 * 16];
+#define INNER_STRIDE 17
+shared float score_tile[64 * INNER_STRIDE];
+shared float value_tile[32 * INNER_STRIDE];
 
 float read_score(uint row, uint column, uint head) {
     const uint words = (parameters.tokens + 1) >> 1;
@@ -51,7 +52,7 @@ void main() {
             const uint tile_row = index / 16;
             const uint source = inner_base + index % 16;
             const uint row = gl_WorkGroupID.y * 64 + tile_row;
-            score_tile[index] =
+            score_tile[tile_row * INNER_STRIDE + index % 16] =
                 head < parameters.heads &&
                     row < parameters.tokens &&
                     source < parameters.tokens
@@ -63,7 +64,7 @@ void main() {
             const uint source = inner_base + index % 16;
             const uint feature =
                 gl_WorkGroupID.x * 32 + tile_column;
-            value_tile[index] =
+            value_tile[tile_column * INNER_STRIDE + index % 16] =
                 head < parameters.heads &&
                     feature < 64 &&
                     source < parameters.tokens
@@ -80,11 +81,13 @@ void main() {
             float value_values[4];
             for (uint row = 0; row < 8; ++row) {
                 score_values[row] = score_tile[
-                    (gl_LocalInvocationID.y * 8 + row) * 16 + inner];
+                    (gl_LocalInvocationID.y * 8 + row) *
+                        INNER_STRIDE + inner];
             }
             for (uint column = 0; column < 4; ++column) {
                 value_values[column] = value_tile[
-                    (gl_LocalInvocationID.x * 4 + column) * 16 + inner];
+                    (gl_LocalInvocationID.x * 4 + column) *
+                        INNER_STRIDE + inner];
             }
             for (uint row = 0; row < 8; ++row) {
                 for (uint column = 0; column < 4; ++column) {
