@@ -474,16 +474,23 @@ FeatureMap DptHead::fusion(
         true);
 }
 
+void DptHead::prepare(
+    std::uint32_t patch_width,
+    std::uint32_t patch_height) {
+    if (patch_width == 0 || patch_height == 0) {
+        throw std::invalid_argument("DPT patch dimensions cannot be zero");
+    }
+    if (!convolution_block_selected_) {
+        select_convolution_block(patch_width, patch_height);
+    }
+}
+
 FeatureMap DptHead::forward(EncoderOutput&& encoded) {
     if (encoded.features.size() != 4 ||
         encoded.embedding != embedding_) {
         throw std::invalid_argument("invalid DPT encoder output");
     }
-    if (!convolution_block_selected_) {
-        select_convolution_block(
-            encoded.patch_width,
-            encoded.patch_height);
-    }
+    prepare(encoded.patch_width, encoded.patch_height);
     FeatureMap layers[4];
     const auto run_projections = [&] {
         for (std::uint32_t index = 0; index < 4; ++index) {

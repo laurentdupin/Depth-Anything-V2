@@ -26,6 +26,10 @@ public:
         VulkanOperators& operators,
         bool force_fp32_weights);
 
+    void prepare(
+        std::uint32_t patch_width,
+        std::uint32_t patch_height);
+
     FeatureMap forward(EncoderOutput&& encoded);
 
 private:

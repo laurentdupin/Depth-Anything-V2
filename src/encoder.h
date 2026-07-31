@@ -30,6 +30,8 @@ public:
         bool force_fp32_weights,
         bool force_fp32_attention);
 
+    void prepare(std::uint32_t width, std::uint32_t height);
+
     EncoderOutput forward(
         const VulkanBuffer& image,
         std::uint32_t width,
