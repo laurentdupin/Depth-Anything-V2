@@ -85,6 +85,28 @@ int main(int argc, char** argv) {
 
     dav2::VulkanOperators operators(context);
     {
+        const std::vector<float> raw_depth{2.0f, 3.0f, 5.0f, 10.0f};
+        auto depth = context.create_device_buffer(
+            raw_depth.size() * sizeof(float));
+        auto range = context.create_device_buffer(2u * sizeof(float));
+        context.upload(
+            depth, raw_depth.data(), raw_depth.size() * sizeof(float));
+        operators.reduce_minmax(
+            depth, range, static_cast<std::uint32_t>(raw_depth.size()));
+        operators.normalize_relative(
+            depth, range, static_cast<std::uint32_t>(raw_depth.size()));
+        std::vector<float> normalized(raw_depth.size());
+        context.download(
+            depth, normalized.data(), normalized.size() * sizeof(float));
+        const std::vector<float> expected{0.0f, 0.125f, 0.375f, 1.0f};
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            expect_near(normalized[index], expected[index], 1.0e-6f);
+        }
+        assert(normalized[3] > normalized[2]);
+        assert(normalized[2] > normalized[1]);
+        assert(normalized[1] > normalized[0]);
+    }
+    {
         constexpr std::uint32_t input_width = 11;
         constexpr std::uint32_t input_height = 9;
         constexpr std::uint32_t input_channels = 5;

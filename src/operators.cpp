@@ -5,6 +5,8 @@
 #include "add_position_spv.h"
 #include "bilinear_align_true_spv.h"
 #include "bilinear_align_true_image_spv.h"
+#include "normalize_relative_spv.h"
+#include "reduce_minmax_spv.h"
 #include "bmm_spv.h"
 #include "bmm_score_half_spv.h"
 #include "bmm_value_half_spv.h"
@@ -280,6 +282,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
           },
           16)),
+      reduce_minmax_(context.create_pipeline(
+          dav2_reduce_minmax_spv, dav2_reduce_minmax_spv_size,
+          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+          {VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT}, 4)),
+      normalize_relative_(context.create_pipeline(
+          dav2_normalize_relative_spv,
+          dav2_normalize_relative_spv_size, 2, 4)),
       relu_(context.create_pipeline(
           dav2_relu_spv, dav2_relu_spv_size, 2, 4)),
       sigmoid_scale_(context.create_pipeline(
@@ -339,6 +349,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "bilinear_align_true");
     bilinear_align_true_image_.set_debug_name(
         "bilinear_align_true_image");
+    reduce_minmax_.set_debug_name("reduce_minmax");
+    normalize_relative_.set_debug_name("normalize_relative");
     relu_.set_debug_name("relu");
     sigmoid_scale_.set_debug_name("sigmoid_scale");
 }
@@ -1055,6 +1067,29 @@ void VulkanOperators::bilinear_align_true_image(
         sizeof(parameters),
         divide_up(output_width, 8),
         divide_up(output_height, 8));
+}
+
+void VulkanOperators::reduce_minmax(
+    const VulkanBuffer& input,
+    VulkanBuffer& range,
+    std::uint32_t count) {
+    if (count == 0) throw std::invalid_argument("empty depth reduction");
+    require_bytes(input, count, "depth reduction input");
+    require_bytes(range, 2, "depth reduction range");
+    context_.dispatch(
+        reduce_minmax_, {&input, &range}, &count, sizeof(count), 1);
+}
+
+void VulkanOperators::normalize_relative(
+    VulkanBuffer& depth,
+    const VulkanBuffer& range,
+    std::uint32_t count) {
+    if (count == 0) throw std::invalid_argument("empty relative depth");
+    require_bytes(depth, count, "relative depth");
+    require_bytes(range, 2, "relative depth range");
+    context_.dispatch(
+        normalize_relative_, {&depth, &range}, &count, sizeof(count),
+        divide_up(count, 256));
 }
 
 void VulkanOperators::relu(

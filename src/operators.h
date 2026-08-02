@@ -130,6 +130,13 @@ public:
         std::uint32_t output_width,
         std::uint32_t output_height);
 
+    void reduce_minmax(
+        const VulkanBuffer& input, VulkanBuffer& range,
+        std::uint32_t count);
+    void normalize_relative(
+        VulkanBuffer& depth, const VulkanBuffer& range,
+        std::uint32_t count);
+
     void relu(VulkanBuffer& output, const VulkanBuffer& input, std::uint32_t count);
     void sigmoid_scale(
         VulkanBuffer& output, const VulkanBuffer& input,
@@ -187,6 +194,8 @@ private:
     VulkanPipeline conv_transpose_nonoverlap_half_;
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
+    VulkanPipeline reduce_minmax_;
+    VulkanPipeline normalize_relative_;
     VulkanPipeline relu_;
     VulkanPipeline sigmoid_scale_;
 };
