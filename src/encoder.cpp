@@ -407,8 +407,12 @@ EncoderOutput DinoEncoder::forward(
     result.embedding = embedding_;
     std::uint32_t capture_index = 0;
 
+#if defined(__ANDROID__)
+    constexpr std::uint32_t blocks_per_submission = 1;
+#else
     const std::uint32_t blocks_per_submission =
         tokens > 2000 ? 4 : blocks_;
+#endif
     for (std::uint32_t block_begin = 0;
          block_begin < blocks_;
          block_begin += blocks_per_submission) {

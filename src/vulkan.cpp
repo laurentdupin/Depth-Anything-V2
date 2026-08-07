@@ -365,8 +365,16 @@ VulkanContext::VulkanContext(
     auto family = std::find_if(
         families.begin(), families.end(), [](const auto& candidate) {
             return candidate.queueCount > 0 &&
+                (candidate.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0 &&
+                (candidate.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0;
+        });
+    if (family == families.end()) {
+        family = std::find_if(
+        families.begin(), families.end(), [](const auto& candidate) {
+            return candidate.queueCount > 0 &&
                 (candidate.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
         });
+    }
     if (family == families.end()) {
         throw std::runtime_error("Vulkan device has no compute queue");
     }
@@ -381,7 +389,14 @@ VulkanContext::VulkanContext(
         family->timestampValidBits != 0;
     timestamp_period_ns_ = properties.limits.timestampPeriod;
 
+    // Inference is throughput work. Keep room for latency-sensitive rendering
+    // when this independent Vulkan device shares a physical Android GPU with
+    // Godot and the OpenXR compositor.
+#if defined(__ANDROID__)
+    constexpr float priority = 0.25f;
+#else
     constexpr float priority = 1.0f;
+#endif
     const VkDeviceQueueCreateInfo queue_info{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         nullptr,

@@ -571,6 +571,11 @@ public:
         };
         const std::uint64_t tokens =
             std::uint64_t(width / 14) * (height / 14) + 1;
+        // A whole-network command buffer can occupy Adreno for more than a
+        // second, starving the independent OpenXR graphics queue. Android
+        // keeps the same graph but submits its operators individually so the
+        // system scheduler can interleave compositor and Godot work.
+#if !defined(__ANDROID__)
         if (tokens <= 2000) {
             encoder_.prepare(
                 static_cast<std::uint32_t>(width),
@@ -582,6 +587,10 @@ public:
         } else {
             run_graph();
         }
+#else
+        (void)tokens;
+        run_graph();
+#endif
         context_.download(
             depth.buffer,
             output,

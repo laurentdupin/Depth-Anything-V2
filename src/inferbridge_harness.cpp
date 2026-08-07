@@ -31,7 +31,11 @@ struct ibrh_runtime {
 struct ibrh_model {
     ibrh_runtime* runtime = nullptr;
     dav2_context* context = nullptr;
+#if defined(__ANDROID__)
+    uint32_t input_size = 140u;
+#else
     uint32_t input_size = 280u;
+#endif
     bool metric = false;
     std::mutex submit_mutex;
 #if defined(_WIN32)
@@ -65,9 +69,11 @@ struct ibrh_job {
     uint32_t width = 0u;
     uint32_t height = 0u;
     bool metric = false;
-    uint32_t state = IBRH_JOB_COMPLETE;
+    std::atomic<uint32_t> state{IBRH_JOB_COMPLETE};
+    std::thread host_worker;
     std::vector<float> depth;
     ~ibrh_job() {
+        if (host_worker.joinable()) host_worker.join();
         if (gpu_job != nullptr) dav2_gpu_job_release(gpu_job);
 #if defined(_WIN32)
         gpu_admission.reset();
@@ -737,65 +743,79 @@ ibrh_result IBRH_CALL submit(
     }
     const auto* source_pixels = reinterpret_cast<const uint8_t*>(
         static_cast<uintptr_t>(input.native_handle)) + input.byte_offset;
-    std::vector<uint8_t> converted;
-    const uint8_t* bgra = source_pixels;
-    ptrdiff_t bgra_stride = input.row_stride_bytes;
-    if (input.pixel_format == IBRH_PIXEL_RGBA8) {
-        converted.resize(static_cast<size_t>(input.width) * input.height * 4u);
-        for (uint32_t y = 0; y < input.height; ++y)
-            for (uint32_t x = 0; x < input.width; ++x) {
-                const auto* source = source_pixels +
-                    static_cast<size_t>(y) * input.row_stride_bytes + x * 4u;
-                auto* target = converted.data() +
-                    (static_cast<size_t>(y) * input.width + x) * 4u;
-                target[0] = source[2]; target[1] = source[1];
-                target[2] = source[0]; target[3] = source[3];
-            }
-        bgra = converted.data();
-        bgra_stride = static_cast<ptrdiff_t>(input.width) * 4;
+    const size_t packed_stride = static_cast<size_t>(input.width) * 4u;
+    std::vector<uint8_t> retained_input(packed_stride * input.height);
+    for (uint32_t y = 0; y < input.height; ++y) {
+        std::memcpy(retained_input.data() + static_cast<size_t>(y) * packed_stride,
+            source_pixels + static_cast<size_t>(y) * input.row_stride_bytes,
+            packed_stride);
     }
-    {
-        std::lock_guard<std::mutex> lock(model->submit_mutex);
-        status = dav2_inferbridge_bgra8_f32(
-            model->context, bgra,
-            static_cast<int32_t>(input.width),
-            static_cast<int32_t>(input.height),
-            bgra_stride,
-            static_cast<int32_t>(size),
-            job->depth.data(), job->depth.size());
-    }
-    if (status != DAV2_STATUS_OK) {
-        const std::string message =
-            std::string("DAV2 inference failed: ") + dav2_last_error();
-        delete job;
-        return fail(model->runtime, status_result(status), message);
-    }
-    auto* target = reinterpret_cast<uint8_t*>(
+    const uint32_t input_width = input.width;
+    const uint32_t input_height = input.height;
+    const uint32_t input_format = input.pixel_format;
+    auto* output_target = reinterpret_cast<uint8_t*>(
         static_cast<uintptr_t>(output_resource.native_handle)) +
         output_resource.byte_offset;
-    for (uint32_t y = 0; y < input.height; ++y) {
-        auto* row = reinterpret_cast<float*>(
-            target + static_cast<size_t>(y) * output_resource.row_stride_bytes);
-        const float source_y =
-            (static_cast<float>(y) + 0.5f) * job->height / input.height - 0.5f;
-        const int y0 = std::clamp(static_cast<int>(std::floor(source_y)),
-            0, static_cast<int>(job->height) - 1);
-        const int y1 = std::min(y0 + 1, static_cast<int>(job->height) - 1);
-        const float wy = std::clamp(source_y - std::floor(source_y), 0.0f, 1.0f);
-        for (uint32_t x = 0; x < input.width; ++x) {
-            const float source_x =
-                (static_cast<float>(x) + 0.5f) * job->width / input.width - 0.5f;
-            const int x0 = std::clamp(static_cast<int>(std::floor(source_x)),
-                0, static_cast<int>(job->width) - 1);
-            const int x1 = std::min(x0 + 1, static_cast<int>(job->width) - 1);
-            const float wx = std::clamp(source_x - std::floor(source_x), 0.0f, 1.0f);
-            const float top = job->depth[static_cast<size_t>(y0) * job->width + x0] * (1.0f - wx) +
-                job->depth[static_cast<size_t>(y0) * job->width + x1] * wx;
-            const float bottom = job->depth[static_cast<size_t>(y1) * job->width + x0] * (1.0f - wx) +
-                job->depth[static_cast<size_t>(y1) * job->width + x1] * wx;
-            row[x] = top * (1.0f - wy) + bottom * wy;
+    const uint32_t output_stride = output_resource.row_stride_bytes;
+    job->state.store(IBRH_JOB_QUEUED);
+    job->host_worker = std::thread([
+        model, job, pixels = std::move(retained_input), input_width,
+        input_height, input_format, size, output_target,
+        output_stride]() mutable {
+        if (job->state.load() == IBRH_JOB_CANCELLED) return;
+        job->state.store(IBRH_JOB_RUNNING);
+        if (input_format == IBRH_PIXEL_RGBA8) {
+            for (size_t offset = 0; offset < pixels.size(); offset += 4u)
+                std::swap(pixels[offset], pixels[offset + 2u]);
         }
-    }
+        dav2_status infer_status;
+        {
+            std::lock_guard<std::mutex> lock(model->submit_mutex);
+            infer_status = dav2_inferbridge_bgra8_f32(
+                model->context, pixels.data(), static_cast<int32_t>(input_width),
+                static_cast<int32_t>(input_height),
+                static_cast<ptrdiff_t>(input_width) * 4,
+                static_cast<int32_t>(size), job->depth.data(),
+                job->depth.size());
+        }
+        if (infer_status != DAV2_STATUS_OK) {
+            job->state.store(IBRH_JOB_FAILED);
+            return;
+        }
+        if (job->state.load() == IBRH_JOB_CANCELLED) return;
+        for (uint32_t y = 0; y < input_height; ++y) {
+            auto* row = reinterpret_cast<float*>(output_target +
+                static_cast<size_t>(y) * output_stride);
+            const float source_y = (static_cast<float>(y) + 0.5f) *
+                job->height / input_height - 0.5f;
+            const int y0 = std::clamp(static_cast<int>(std::floor(source_y)),
+                0, static_cast<int>(job->height) - 1);
+            const int y1 = std::min(y0 + 1, static_cast<int>(job->height) - 1);
+            const float wy = std::clamp(
+                source_y - std::floor(source_y), 0.0f, 1.0f);
+            for (uint32_t x = 0; x < input_width; ++x) {
+                const float source_x = (static_cast<float>(x) + 0.5f) *
+                    job->width / input_width - 0.5f;
+                const int x0 = std::clamp(static_cast<int>(std::floor(source_x)),
+                    0, static_cast<int>(job->width) - 1);
+                const int x1 = std::min(
+                    x0 + 1, static_cast<int>(job->width) - 1);
+                const float wx = std::clamp(
+                    source_x - std::floor(source_x), 0.0f, 1.0f);
+                const float top =
+                    job->depth[static_cast<size_t>(y0) * job->width + x0] *
+                        (1.0f - wx) +
+                    job->depth[static_cast<size_t>(y0) * job->width + x1] * wx;
+                const float bottom =
+                    job->depth[static_cast<size_t>(y1) * job->width + x0] *
+                        (1.0f - wx) +
+                    job->depth[static_cast<size_t>(y1) * job->width + x1] * wx;
+                row[x] = top * (1.0f - wy) + bottom * wy;
+            }
+        }
+        if (job->state.load() != IBRH_JOB_CANCELLED)
+            job->state.store(IBRH_JOB_COMPLETE);
+    });
     *output = job;
     return IBRH_OK;
 }
@@ -843,7 +863,7 @@ ibrh_result IBRH_CALL job_poll(
                 return IBRH_ERROR_INTERNAL;
         }
     } else {
-        status->state = job->state;
+        status->state = job->state.load();
     }
     status->output_count = 1u;
     status->source_frame_id = job->source_frame_id;
@@ -876,8 +896,12 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
         return IBRH_OK;
     }
 #endif
-    return job->state == IBRH_JOB_COMPLETE ?
-        IBRH_ERROR_INVALID_STATE : IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+    const uint32_t state = job->state.load();
+    if (state == IBRH_JOB_COMPLETE || state == IBRH_JOB_FAILED ||
+        state == IBRH_JOB_CANCELLED)
+        return IBRH_ERROR_INVALID_STATE;
+    job->state.store(IBRH_JOB_CANCELLED);
+    return IBRH_OK;
 }
 
 void IBRH_CALL job_release(ibrh_job* job) {
