@@ -713,16 +713,12 @@ dav2_status DAV2_CALL dav2_inferbridge_bgra8_f32(
             output_shape.width,
             output_shape.height,
             context->image_output.data());
-        if (context->executor->metric_max_depth() > 0.0f) {
-            std::copy(
-                context->image_output.begin(),
-                context->image_output.end(), output_depth);
-            return;
-        }
         const auto bounds = std::minmax_element(
             context->image_output.begin(), context->image_output.end());
         const float minimum = *bounds.first;
-        const float span = *bounds.second - minimum;
+        const float span = context->executor->metric_max_depth() > 0.0f
+            ? 25.0f - minimum
+            : *bounds.second - minimum;
         if (!(span > 0.0f)) {
             std::fill_n(output_depth, required, 0.0f);
             return;

@@ -708,12 +708,18 @@ public:
                         request.width,
                         request.height,
                         1);
-                    if (model_.derivation().metric_max_depth <= 0.0f) {
-                        VulkanBuffer range =
-                            context_.create_device_buffer(2u * sizeof(float));
-                        const std::uint32_t count =
-                            request.width * request.height;
-                        operators_.reduce_minmax(output, range, count);
+                    VulkanBuffer range =
+                        context_.create_device_buffer(2u * sizeof(float));
+                    const std::uint32_t count =
+                        request.width * request.height;
+                    operators_.reduce_minmax(output, range, count);
+                    if (model_.derivation().metric_max_depth > 0.0f) {
+                        // Match the Unity publication contract: metric models
+                        // retain metres per unit but anchor the nearest sample
+                        // at the screen front and encode a 25 m presentation
+                        // interval into 0..1.
+                        operators_.normalize_metric(output, range, count, 25.0f);
+                    } else {
                         operators_.normalize_relative(output, range, count);
                     }
                     context_.release_external_buffer(
@@ -853,39 +859,33 @@ public:
                         static_cast<std::uint32_t>(shape.height));
                     FeatureMap depth =
                         dpt_.forward(std::move(encoded));
+                    const std::uint32_t count =
+                        request.width * request.height;
+                    VulkanBuffer resized = context_.create_device_buffer(
+                        static_cast<std::uint64_t>(count) * sizeof(float));
+                    operators_.bilinear_align_true(
+                        resized,
+                        depth.buffer,
+                        static_cast<std::uint32_t>(shape.width),
+                        static_cast<std::uint32_t>(shape.height),
+                        request.width,
+                        request.height,
+                        1);
+                    VulkanBuffer range =
+                        context_.create_device_buffer(2u * sizeof(float));
+                    operators_.reduce_minmax(resized, range, count);
                     if (model_.derivation().metric_max_depth > 0.0f) {
-                        operators_.bilinear_align_true_image(
-                            output,
-                            depth.buffer,
-                            static_cast<std::uint32_t>(shape.width),
-                            static_cast<std::uint32_t>(shape.height),
-                            request.width,
-                            request.height);
+                        operators_.normalize_metric(resized, range, count, 25.0f);
                     } else {
-                        const std::uint32_t count =
-                            request.width * request.height;
-                        VulkanBuffer resized = context_.create_device_buffer(
-                            static_cast<std::uint64_t>(count) * sizeof(float));
-                        operators_.bilinear_align_true(
-                            resized,
-                            depth.buffer,
-                            static_cast<std::uint32_t>(shape.width),
-                            static_cast<std::uint32_t>(shape.height),
-                            request.width,
-                            request.height,
-                            1);
-                        VulkanBuffer range =
-                            context_.create_device_buffer(2u * sizeof(float));
-                        operators_.reduce_minmax(resized, range, count);
                         operators_.normalize_relative(resized, range, count);
-                        operators_.bilinear_align_true_image(
-                            output,
-                            resized,
-                            request.width,
-                            request.height,
-                            request.width,
-                            request.height);
                     }
+                    operators_.bilinear_align_true_image(
+                        output,
+                        resized,
+                        request.width,
+                        request.height,
+                        request.width,
+                        request.height);
                     context_.release_external_image(
                         input,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,

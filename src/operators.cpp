@@ -6,6 +6,7 @@
 #include "bilinear_align_true_spv.h"
 #include "bilinear_align_true_image_spv.h"
 #include "normalize_relative_spv.h"
+#include "normalize_metric_spv.h"
 #include "reduce_minmax_spv.h"
 #include "bmm_spv.h"
 #include "bmm_score_half_spv.h"
@@ -290,6 +291,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       normalize_relative_(context.create_pipeline(
           dav2_normalize_relative_spv,
           dav2_normalize_relative_spv_size, 2, 4)),
+      normalize_metric_(context.create_pipeline(
+          dav2_normalize_metric_spv,
+          dav2_normalize_metric_spv_size, 2, 8)),
       relu_(context.create_pipeline(
           dav2_relu_spv, dav2_relu_spv_size, 2, 4)),
       sigmoid_scale_(context.create_pipeline(
@@ -351,6 +355,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "bilinear_align_true_image");
     reduce_minmax_.set_debug_name("reduce_minmax");
     normalize_relative_.set_debug_name("normalize_relative");
+    normalize_metric_.set_debug_name("normalize_metric");
     relu_.set_debug_name("relu");
     sigmoid_scale_.set_debug_name("sigmoid_scale");
 }
@@ -1090,6 +1095,25 @@ void VulkanOperators::normalize_relative(
     context_.dispatch(
         normalize_relative_, {&depth, &range}, &count, sizeof(count),
         divide_up(count, 256));
+}
+
+void VulkanOperators::normalize_metric(
+    VulkanBuffer& depth,
+    const VulkanBuffer& range,
+    std::uint32_t count,
+    float maximum_depth) {
+    if (count == 0 || !(maximum_depth > 0.0f)) {
+        throw std::invalid_argument("invalid metric depth normalization");
+    }
+    require_bytes(depth, count, "metric depth");
+    require_bytes(range, 2, "metric depth range");
+    struct Parameters {
+        std::uint32_t count;
+        float maximum_depth;
+    } parameters{count, maximum_depth};
+    context_.dispatch(
+        normalize_metric_, {&depth, &range},
+        &parameters, sizeof(parameters), divide_up(count, 256));
 }
 
 void VulkanOperators::relu(

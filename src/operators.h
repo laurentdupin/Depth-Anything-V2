@@ -136,6 +136,9 @@ public:
     void normalize_relative(
         VulkanBuffer& depth, const VulkanBuffer& range,
         std::uint32_t count);
+    void normalize_metric(
+        VulkanBuffer& depth, const VulkanBuffer& range,
+        std::uint32_t count, float maximum_depth);
 
     void relu(VulkanBuffer& output, const VulkanBuffer& input, std::uint32_t count);
     void sigmoid_scale(
@@ -196,6 +199,7 @@ private:
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline reduce_minmax_;
     VulkanPipeline normalize_relative_;
+    VulkanPipeline normalize_metric_;
     VulkanPipeline relu_;
     VulkanPipeline sigmoid_scale_;
 };
