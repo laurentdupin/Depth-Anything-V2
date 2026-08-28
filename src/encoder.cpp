@@ -1,4 +1,5 @@
 #include "encoder.h"
+#include "inferbridge/native_harness_precision.h"
 
 #include <algorithm>
 #include <array>
@@ -219,10 +220,9 @@ void DinoEncoder::select_linear_tile(std::uint32_t rows) {
             best_time = median;
         }
     }
-    Candidate* best =
-        !force_fp32_weights_ && best_half_time < best_fp32_time * 0.995
-        ? best_half
-        : best_fp32;
+    Candidate* best = inferbridge::native::select_fp16_weights(
+        !force_fp32_weights_ && best_half_time < best_fp32_time * 0.995)
+        ? best_half : best_fp32;
     if (best->vectorized && best->vector_tile == 16) {
         for (Candidate& candidate : candidates) {
             if (candidate.half_weight == best->half_weight &&
@@ -377,8 +377,8 @@ EncoderOutput DinoEncoder::forward(
     });
     const auto existing_attention =
         half_attention_by_tokens_.find(tokens);
-    const bool half_attention = force_fp32_attention_
-        ? false
+    const bool half_attention = inferbridge::native::select_fp16_weights(
+        force_fp32_attention_ ? false
         : existing_attention != half_attention_by_tokens_.end()
         ? existing_attention->second
         : half_attention_by_tokens_
@@ -390,7 +390,7 @@ EncoderOutput DinoEncoder::forward(
                       qkv,
                       attention,
                       tokens))
-              .first->second;
+              .first->second);
     const VkDeviceSize attention_score_bytes = half_attention
         ? std::uint64_t(heads_) * tokens *
             ((std::uint64_t(tokens) + 1) / 2) *

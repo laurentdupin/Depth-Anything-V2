@@ -1,4 +1,5 @@
 #include "dpt.h"
+#include "inferbridge/native_harness_precision.h"
 
 #include <algorithm>
 #include <array>
@@ -157,11 +158,10 @@ void DptHead::select_convolution_block(
             best_time = median;
         }
     }
-    Candidate* best =
+    Candidate* best = inferbridge::native::select_fp16_weights(
         !force_fp32_weights_ && features_ >= 256 &&
-            best_half_time < best_fp32_time * 0.90
-        ? best_half
-        : best_fp32;
+            best_half_time < best_fp32_time * 0.90)
+        ? best_half : best_fp32;
     convolution_block8_ = best->block8;
     convolution_half_weight_ = best->half_weight;
     const std::uint32_t full_width = patch_width * 14;
