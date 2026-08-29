@@ -150,6 +150,15 @@ set_target_properties(depth_anything_v2 PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES
 )
+if(APPLE)
+    # The packaged harness and MoltenVK live together in the runtime's bin
+    # directory. Never retain the producer machine's absolute addon path.
+    set_target_properties(depth_anything_v2 PROPERTIES
+        BUILD_RPATH "@loader_path"
+        BUILD_WITH_INSTALL_RPATH YES
+        INSTALL_RPATH "@loader_path"
+    )
+endif()
 
 if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
