@@ -46,6 +46,7 @@ struct GpuTextureSubmitRequest {
     std::uintptr_t wait_fence_handle = 0;
     std::uint64_t wait_fence_value = 0;
     std::uintptr_t output_texture_handle = 0;
+    std::uintptr_t output_texture_identity = 0;
     std::uint32_t output_width = 0;
     std::uint32_t output_height = 0;
     std::uintptr_t signal_fence_handle = 0;

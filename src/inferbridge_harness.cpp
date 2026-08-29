@@ -62,6 +62,7 @@ struct ibrh_job {
     uint64_t input_fence_value = 0u;
     uint32_t input_pixel_format = DAV2_GPU_PIXEL_BGRA8;
     uintptr_t output_texture_handle = 0u;
+    uintptr_t output_texture_identity = 0u;
     uintptr_t output_fence_handle = 0u;
     uint64_t output_fence_value = 0u;
     int32_t input_size = 0;
@@ -348,7 +349,7 @@ private:
                 job->output_texture_handle, job->width, job->height,
                 job->output_fence_handle, job->output_fence_value,
                 job->source_frame_id, job->timestamp_ns,
-                job->input_texture_identity};
+                job->input_texture_identity, job->output_texture_identity};
             dav2_gpu_job* native_job = nullptr;
             const dav2_status status = dav2_submit_d3d12_texture_binding(
                 context_, &request, &native_job);
@@ -705,6 +706,10 @@ ibrh_result IBRH_CALL submit(
             ? DAV2_GPU_PIXEL_BGRA8 : DAV2_GPU_PIXEL_RGBA8;
         job->output_texture_handle =
             static_cast<uintptr_t>(output_resource.native_handle);
+        job->output_texture_identity = static_cast<uintptr_t>(
+            output_resource.auxiliary_handle != 0u
+                ? output_resource.auxiliary_handle
+                : output_resource.native_handle);
         job->output_fence_handle =
             static_cast<uintptr_t>(signal.native_handle);
         job->output_fence_value = signal.value;

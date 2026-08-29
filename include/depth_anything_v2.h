@@ -175,6 +175,7 @@ typedef struct dav2_d3d12_texture_binding_request {
     uint64_t source_frame_id; uint64_t timestamp_ns;
     /* Stable provider identity; the import handle itself may be duplicated. */
     uint64_t input_texture_identity;
+    uint64_t output_texture_identity;
 } dav2_d3d12_texture_binding_request;
 
 typedef struct dav2_gpu_job_status {

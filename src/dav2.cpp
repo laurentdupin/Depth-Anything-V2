@@ -669,13 +669,16 @@ dav2_status DAV2_CALL dav2_submit_d3d12_texture_binding(
     if (!context || !request || !job)
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "null D3D12 texture binding argument");
     *job = nullptr;
-    if (request->struct_size < sizeof(*request) || request->abi_version != DAV2_ABI_VERSION)
+    constexpr std::size_t binding_v1_size =
+        offsetof(dav2_d3d12_texture_binding_request, input_texture_identity);
+    if (request->struct_size < binding_v1_size || request->abi_version != DAV2_ABI_VERSION)
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "invalid D3D12 texture binding request");
     return protect([&] {
         dav2::GpuTextureSubmitRequest native;
         native.shared_texture_handle = static_cast<std::uintptr_t>(request->input_texture_handle);
+        const bool has_stable_identities = request->struct_size >= sizeof(*request);
         native.shared_texture_identity = static_cast<std::uintptr_t>(
-            request->input_texture_identity != 0
+            has_stable_identities && request->input_texture_identity != 0
                 ? request->input_texture_identity
                 : request->input_texture_handle);
         native.width = request->input_width; native.height = request->input_height;
@@ -684,6 +687,10 @@ dav2_status DAV2_CALL dav2_submit_d3d12_texture_binding(
         native.wait_fence_handle = static_cast<std::uintptr_t>(request->wait_fence_handle);
         native.wait_fence_value = request->wait_fence_value;
         native.output_texture_handle = static_cast<std::uintptr_t>(request->output_texture_handle);
+        native.output_texture_identity = static_cast<std::uintptr_t>(
+            has_stable_identities && request->output_texture_identity != 0
+                ? request->output_texture_identity
+                : request->output_texture_handle);
         native.output_width = request->output_width; native.output_height = request->output_height;
         native.signal_fence_handle = static_cast<std::uintptr_t>(request->signal_fence_handle);
         native.signal_fence_value = request->signal_fence_value;
