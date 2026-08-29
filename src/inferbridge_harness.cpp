@@ -57,6 +57,7 @@ struct ibrh_job {
     std::atomic<bool> cancel_requested{false};
     std::string gpu_error;
     uintptr_t input_texture_handle = 0u;
+    uintptr_t input_texture_identity = 0u;
     uintptr_t input_fence_handle = 0u;
     uint64_t input_fence_value = 0u;
     uint32_t input_pixel_format = DAV2_GPU_PIXEL_BGRA8;
@@ -346,7 +347,8 @@ private:
                 job->input_fence_handle, job->input_fence_value,
                 job->output_texture_handle, job->width, job->height,
                 job->output_fence_handle, job->output_fence_value,
-                job->source_frame_id, job->timestamp_ns};
+                job->source_frame_id, job->timestamp_ns,
+                job->input_texture_identity};
             dav2_gpu_job* native_job = nullptr;
             const dav2_status status = dav2_submit_d3d12_texture_binding(
                 context_, &request, &native_job);
@@ -694,6 +696,9 @@ ibrh_result IBRH_CALL submit(
             return IBRH_ERROR_INTERNAL;
         }
         job->input_texture_handle = static_cast<uintptr_t>(input.native_handle);
+        job->input_texture_identity = static_cast<uintptr_t>(
+            input.auxiliary_handle != 0u
+                ? input.auxiliary_handle : input.native_handle);
         job->input_fence_handle = static_cast<uintptr_t>(wait.native_handle);
         job->input_fence_value = wait.value;
         job->input_pixel_format = input.pixel_format == IBRH_PIXEL_BGRA8

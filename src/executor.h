@@ -38,6 +38,7 @@ struct GpuSubmitRequest {
 
 struct GpuTextureSubmitRequest {
     std::uintptr_t shared_texture_handle = 0;
+    std::uintptr_t shared_texture_identity = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     dav2_gpu_pixel_format pixel_format = DAV2_GPU_PIXEL_BGRA8;

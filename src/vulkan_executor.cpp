@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -123,6 +124,15 @@ struct GpuSlot {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint64_t fence_value = 0;
+};
+
+struct CachedExternalImage {
+    std::uintptr_t shared_handle = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkImageUsageFlags usage = 0;
+    VulkanImage image;
 };
 
 SharedD3D12Output create_shared_output(
@@ -800,20 +810,12 @@ public:
             throw std::invalid_argument(
                 "invalid D3D12 GPU texture inference request");
         }
-        validate_shared_texture(
-            d3d12_device_.Get(),
-            request.shared_texture_handle,
-            request.width,
-            request.height,
-            request.pixel_format);
         const bool external_output = request.output_texture_handle != 0;
         if (external_output) {
             if (request.output_width != request.width ||
                 request.output_height != request.height ||
                 !request.signal_fence_handle || !request.signal_fence_value)
                 throw std::invalid_argument("invalid InferBridge-owned D3D12 output binding");
-            validate_shared_depth_texture(d3d12_device_.Get(),
-                request.output_texture_handle, request.output_width, request.output_height);
         }
         std::shared_ptr<GpuSlot> slot;
         if (!external_output) slot = acquire_gpu_slot(gpu_slots_, next_gpu_slot_);
@@ -822,28 +824,38 @@ public:
                 static_cast<int>(request.width),
                 static_cast<int>(request.height),
                 request.input_size);
-            VulkanImage output = external_output
-                ? context_.import_d3d12_image(
-                    reinterpret_cast<void*>(request.output_texture_handle),
+            VulkanImage transient_output;
+            VulkanImage* output = nullptr;
+            if (external_output) {
+                output = &cached_external_image(
+                    output_image_cache_, request.output_texture_handle,
+                    request.output_texture_handle,
                     request.output_width, request.output_height,
                     VK_FORMAT_R32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-                : prepare_texture_output(*slot, d3d12_device_.Get(), context_,
+                    VK_IMAGE_USAGE_STORAGE_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    true, request.pixel_format);
+            } else {
+                transient_output = prepare_texture_output(
+                    *slot, d3d12_device_.Get(), context_,
                     request.width, request.height);
+                output = &transient_output;
+            }
             const std::uint64_t signal_value = external_output
                 ? request.signal_fence_value : ++slot->fence_value;
             const VkFormat input_format =
                 request.pixel_format == DAV2_GPU_PIXEL_BGRA8
                 ? VK_FORMAT_B8G8R8A8_UNORM
                 : VK_FORMAT_R8G8B8A8_UNORM;
-            VulkanImage input = context_.import_d3d12_image(
-                reinterpret_cast<void*>(
-                    request.shared_texture_handle),
+            VulkanImage& input = cached_external_image(
+                input_image_cache_, request.shared_texture_handle,
+                request.shared_texture_identity,
                 request.width,
                 request.height,
                 input_format,
                 VK_IMAGE_USAGE_SAMPLED_BIT |
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                false, request.pixel_format);
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(
                     request.wait_fence_handle),
@@ -867,7 +879,7 @@ public:
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
                     context_.acquire_external_image(
-                        output,
+                        *output,
                         VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
                     preprocessor_.run_texture(
@@ -894,7 +906,7 @@ public:
                             depth.buffer, range, count);
                     }
                     operators_.bilinear_align_true_image(
-                        output,
+                        *output,
                         depth.buffer,
                         depth.width,
                         depth.height,
@@ -905,7 +917,7 @@ public:
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
                     context_.release_external_image(
-                        output,
+                        *output,
                         VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
                 });
@@ -913,8 +925,8 @@ public:
                 slot,
                 lifetime_,
                 VulkanBuffer{},
-                std::move(input),
-                std::move(output),
+                VulkanImage{},
+                std::move(transient_output),
                 std::move(submission),
                 request.width,
                 request.height,
@@ -943,6 +955,46 @@ public:
     }
 
 private:
+    VulkanImage& cached_external_image(
+        std::vector<CachedExternalImage>& cache,
+        std::uintptr_t shared_handle,
+        std::uintptr_t stable_identity,
+        std::uint32_t width,
+        std::uint32_t height,
+        VkFormat format,
+        VkImageUsageFlags usage,
+        bool depth,
+        dav2_gpu_pixel_format pixel_format) {
+        if (stable_identity == 0u) stable_identity = shared_handle;
+        for (CachedExternalImage& entry : cache) {
+            if (entry.shared_handle == stable_identity &&
+                entry.width == width && entry.height == height &&
+                entry.format == format && entry.usage == usage)
+                return entry.image;
+        }
+        // Validate only when a new stable shared resource is first observed.
+        // Reopening it every frame defeats the import cache on Windows.
+        if (depth) {
+            validate_shared_depth_texture(
+                d3d12_device_.Get(), shared_handle, width, height);
+        } else {
+            validate_shared_texture(
+                d3d12_device_.Get(), shared_handle, width, height,
+                pixel_format);
+        }
+        CachedExternalImage entry;
+        entry.shared_handle = stable_identity;
+        entry.width = width;
+        entry.height = height;
+        entry.format = format;
+        entry.usage = usage;
+        entry.image = context_.import_d3d12_image(
+            reinterpret_cast<void*>(shared_handle), width, height,
+            format, usage);
+        cache.push_back(std::move(entry));
+        return cache.back().image;
+    }
+
     ModelFile model_;
     VulkanContext context_;
     inferbridge::native::Precision precision_ =
@@ -956,6 +1008,8 @@ private:
     ComPtr<ID3D12Device> d3d12_device_;
     std::array<
         std::shared_ptr<GpuSlot>, kGpuSlotCount> gpu_slots_;
+    std::vector<CachedExternalImage> input_image_cache_;
+    std::vector<CachedExternalImage> output_image_cache_;
     inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_ =
         inferbridge::native_harness::make_resource_lifetime_domain();
     std::atomic<std::uint32_t> next_gpu_slot_{0};

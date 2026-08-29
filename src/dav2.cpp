@@ -674,6 +674,10 @@ dav2_status DAV2_CALL dav2_submit_d3d12_texture_binding(
     return protect([&] {
         dav2::GpuTextureSubmitRequest native;
         native.shared_texture_handle = static_cast<std::uintptr_t>(request->input_texture_handle);
+        native.shared_texture_identity = static_cast<std::uintptr_t>(
+            request->input_texture_identity != 0
+                ? request->input_texture_identity
+                : request->input_texture_handle);
         native.width = request->input_width; native.height = request->input_height;
         native.pixel_format = static_cast<dav2_gpu_pixel_format>(request->input_pixel_format);
         native.input_size = request->input_size;

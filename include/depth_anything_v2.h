@@ -173,6 +173,8 @@ typedef struct dav2_d3d12_texture_binding_request {
     uint32_t output_width; uint32_t output_height;
     uint64_t signal_fence_handle; uint64_t signal_fence_value;
     uint64_t source_frame_id; uint64_t timestamp_ns;
+    /* Stable provider identity; the import handle itself may be duplicated. */
+    uint64_t input_texture_identity;
 } dav2_d3d12_texture_binding_request;
 
 typedef struct dav2_gpu_job_status {
