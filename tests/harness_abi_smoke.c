@@ -23,6 +23,7 @@ int main(void) {
     CHECK(
         api.query_capabilities(sizeof(capabilities), &capabilities) ==
         IBRH_OK);
+#if defined(_WIN32)
     CHECK(
         capabilities.flags ==
         (IBRH_CAP_HOST_MEMORY | IBRH_CAP_ASYNC_SUBMIT |
@@ -40,9 +41,23 @@ int main(void) {
     CHECK(
         capabilities.synchronization_mask ==
         (1ull << IBRH_SYNC_D3D12_FENCE));
+#else
+    CHECK(capabilities.flags == IBRH_CAP_HOST_MEMORY);
+    CHECK(
+        capabilities.input_domain_mask ==
+        (1ull << IBRH_RESOURCE_DOMAIN_HOST));
+    CHECK(
+        capabilities.output_domain_mask ==
+        (1ull << IBRH_RESOURCE_DOMAIN_HOST));
+    CHECK(capabilities.synchronization_mask == 0u);
+#endif
     CHECK(capabilities.maximum_inputs == 1u);
     CHECK(capabilities.maximum_outputs == 1u);
+#if defined(_WIN32)
     CHECK(capabilities.maximum_in_flight_jobs == 3u);
+#else
+    CHECK(capabilities.maximum_in_flight_jobs == 1u);
+#endif
     CHECK(
         capabilities.harness_id.size ==
         strlen("inferbridge.depth-anything-v2.native"));
