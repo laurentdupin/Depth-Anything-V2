@@ -55,6 +55,15 @@ struct VulkanExternalCapabilities {
     bool d3d12_r32_storage_image_import = false;
 };
 
+struct VulkanComputeCapabilities {
+    // True only when 16-bit storage and native float16 shader arithmetic are
+    // both available and enabled on the logical device.
+    bool fp16 = false;
+    // True only for accelerated signed packed 4x8 integer dot products.  A
+    // software emulation is deliberately not advertised as INT8 support.
+    bool packed_int8_dot = false;
+};
+
 class VulkanSemaphore {
 public:
     VulkanSemaphore() = default;
@@ -174,6 +183,9 @@ public:
     const std::string& device_name() const { return device_name_; }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
+    }
+    const VulkanComputeCapabilities& compute_capabilities() const {
+        return compute_capabilities_;
     }
 #if defined(_WIN32)
     std::uint64_t adapter_luid() const { return adapter_luid_; }
@@ -399,6 +411,7 @@ private:
     VkDeviceSize pooled_device_bytes_ = 0;
     VkDeviceSize pooled_host_bytes_ = 0;
     VulkanExternalCapabilities external_capabilities_{};
+    VulkanComputeCapabilities compute_capabilities_{};
 #if defined(_WIN32)
     std::uint64_t adapter_luid_ = 0;
     PFN_vkGetMemoryWin32HandlePropertiesKHR

@@ -30,13 +30,13 @@ DptHead::DptHead(
     VulkanContext& context,
     GpuModel& weights,
     VulkanOperators& operators,
-    bool force_fp32_weights,
+    inferbridge::native::Precision precision,
     float metric_max_depth)
     : context_(context),
       weights_(weights),
       operators_(operators),
       zero_bias_(context.create_device_buffer(sizeof(float))),
-      force_fp32_weights_(force_fp32_weights),
+      precision_(precision),
       metric_max_depth_(metric_max_depth) {
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
@@ -158,9 +158,8 @@ void DptHead::select_convolution_block(
             best_time = median;
         }
     }
-    Candidate* best = inferbridge::native::select_fp16_weights(
-        !force_fp32_weights_ && features_ >= 256 &&
-            best_half_time < best_fp32_time * 0.90)
+    Candidate* best =
+        precision_ == inferbridge::native::Precision::fp16
         ? best_half : best_fp32;
     convolution_block8_ = best->block8;
     convolution_half_weight_ = best->half_weight;

@@ -193,9 +193,20 @@ dav2_status DAV2_CALL dav2_create(
     constexpr uint32_t supported_flags =
         DAV2_CREATE_FORCE_FP32 |
         DAV2_CREATE_FORCE_FP32_WEIGHTS |
-        DAV2_CREATE_FORCE_FP32_ATTENTION;
+        DAV2_CREATE_FORCE_FP32_ATTENTION |
+        DAV2_CREATE_FORCE_FP16 |
+        DAV2_CREATE_FORCE_INT8;
     if ((options->flags & ~supported_flags) != 0) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported create flags");
+    }
+    const uint32_t precision_flags = options->flags &
+        (DAV2_CREATE_FORCE_FP32 | DAV2_CREATE_FORCE_FP16 |
+         DAV2_CREATE_FORCE_INT8);
+    if (precision_flags != 0 &&
+        (precision_flags & (precision_flags - 1u)) != 0) {
+        return fail(
+            DAV2_STATUS_INVALID_ARGUMENT,
+            "multiple DAV2 execution precisions were requested");
     }
     return protect([&] {
         auto result = std::make_unique<dav2_context>();

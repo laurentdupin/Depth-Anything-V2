@@ -24,7 +24,7 @@ public:
         VulkanContext& context,
         GpuModel& weights,
         VulkanOperators& operators,
-        bool force_fp32_weights,
+        inferbridge::native::Precision precision,
         float metric_max_depth);
 
     void prepare(
@@ -70,7 +70,8 @@ private:
     bool convolution_half_weight_ = false;
     bool convolution_tiled_ = false;
     bool stride2_tiled_ = false;
-    bool force_fp32_weights_ = false;
+    inferbridge::native::Precision precision_ =
+        inferbridge::native::Precision::fp32;
     float metric_max_depth_ = 0.0f;
 };
 

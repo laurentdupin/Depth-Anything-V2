@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -85,7 +86,7 @@ namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.depth-anything-v2.native";
-constexpr char kHarnessVersion[] = "1.2.0";
+constexpr char kHarnessVersion[] = "1.3.0";
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -202,6 +203,35 @@ dav2_encoder encoder(
         source.find("base") != std::string::npos)
         return DAV2_ENCODER_VITB;
     return DAV2_ENCODER_VITS;
+}
+
+bool precision_flags(
+    const std::string& parameters,
+    uint32_t& flags) {
+    std::string precision;
+    if (!json_string(parameters, "Precision", precision)) {
+        (void)json_string(parameters, "precision", precision);
+    }
+    std::transform(
+        precision.begin(), precision.end(), precision.begin(),
+        [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+    flags = 0u;
+    if (precision.empty() || precision == "auto") return true;
+    if (precision == "fp32") {
+        flags = DAV2_CREATE_FORCE_FP32;
+        return true;
+    }
+    if (precision == "fp16") {
+        flags = DAV2_CREATE_FORCE_FP16;
+        return true;
+    }
+    if (precision == "int8") {
+        flags = DAV2_CREATE_FORCE_INT8;
+        return true;
+    }
+    return false;
 }
 
 ibrh_result status_result(dav2_status status) {
@@ -459,10 +489,17 @@ ibrh_result IBRH_CALL model_load(
             runtime, IBRH_ERROR_INVALID_ARGUMENT,
             "DAV2 Size must be an integer from 1 to 4096");
     }
+    uint32_t create_flags = 0u;
+    if (!precision_flags(parameters, create_flags)) {
+        delete model;
+        return fail(
+            runtime, IBRH_ERROR_INVALID_ARGUMENT,
+            "DAV2 Precision must be auto, fp32, fp16, or int8");
+    }
     const dav2_create_options options{
         sizeof(options), DAV2_ABI_VERSION, encoder(path, parameters),
         runtime->vulkan_device_index,
-        DAV2_CREATE_FORCE_FP32_ATTENTION};
+        create_flags};
     const dav2_status status =
         dav2_create(path.c_str(), &options, &model->context);
     if (status != DAV2_STATUS_OK) {

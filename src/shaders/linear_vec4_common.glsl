@@ -13,6 +13,19 @@ layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
     float data[];
 } output_buffer;
+#if defined(FP16_ARITHMETIC)
+#define DAV2_VEC4 f16vec4
+layout(set = 0, binding = 1, std430) readonly buffer Input {
+    f16vec4 data[];
+} input_buffer;
+layout(set = 0, binding = 2, std430) readonly buffer Weight {
+    f16vec4 data[];
+} weight_buffer;
+f16vec4 read_weight4(uint vector_index) {
+    return weight_buffer.data[vector_index];
+}
+#else
+#define DAV2_VEC4 vec4
 layout(set = 0, binding = 1, std430) readonly buffer Input {
     vec4 data[];
 } input_buffer;
@@ -33,6 +46,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Weight {
 vec4 read_weight4(uint vector_index) {
     return weight_buffer.data[vector_index];
 }
+#endif
 #endif
 layout(set = 0, binding = 3, std430) readonly buffer Bias {
     float data[];
@@ -74,8 +88,8 @@ float exact_gelu(float value) {
 #define K_VECTORS 4
 #endif
 #define K_STRIDE (K_VECTORS + 1)
-shared vec4 input_tile[TILE_ROWS * K_STRIDE];
-shared vec4 weight_tile[64 * K_STRIDE];
+shared DAV2_VEC4 input_tile[TILE_ROWS * K_STRIDE];
+shared DAV2_VEC4 weight_tile[64 * K_STRIDE];
 
 void main() {
     const uint column_base =
@@ -109,7 +123,7 @@ void main() {
                     inner_vector < input_vectors
                 ? input_buffer.data[
                       output_row * input_vectors + inner_vector]
-                : vec4(0.0);
+                : DAV2_VEC4(0.0);
         }
         for (uint index = lane;
              index < 64 * K_VECTORS;
@@ -124,7 +138,7 @@ void main() {
                     inner_vector < input_vectors
                 ? read_weight4(
                       output_column * input_vectors + inner_vector)
-                : vec4(0.0);
+                : DAV2_VEC4(0.0);
         }
         barrier();
         const uint vector_count =
@@ -132,8 +146,8 @@ void main() {
         for (uint inner_vector = 0;
              inner_vector < vector_count;
              ++inner_vector) {
-            vec4 input_values[ROWS_PER_LANE];
-            vec4 weight_values[4];
+            DAV2_VEC4 input_values[ROWS_PER_LANE];
+            DAV2_VEC4 weight_values[4];
             for (uint row = 0; row < ROWS_PER_LANE; ++row) {
                 input_values[row] = input_tile[
                     (gl_LocalInvocationID.y * ROWS_PER_LANE + row) *
@@ -147,8 +161,8 @@ void main() {
             }
             for (uint row = 0; row < ROWS_PER_LANE; ++row) {
                 for (uint column = 0; column < 4; ++column) {
-                    sums[row][column] +=
-                        dot(input_values[row], weight_values[column]);
+                    sums[row][column] += float(
+                        dot(input_values[row], weight_values[column]));
                 }
             }
         }

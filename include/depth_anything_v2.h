@@ -63,7 +63,9 @@ enum {
     DAV2_CREATE_FORCE_FP32 = 1u << 0u,
     /* Development/tuning controls; the combined flag above is preferred. */
     DAV2_CREATE_FORCE_FP32_WEIGHTS = 1u << 1u,
-    DAV2_CREATE_FORCE_FP32_ATTENTION = 1u << 2u
+    DAV2_CREATE_FORCE_FP32_ATTENTION = 1u << 2u,
+    DAV2_CREATE_FORCE_FP16 = 1u << 3u,
+    DAV2_CREATE_FORCE_INT8 = 1u << 4u
 };
 
 typedef struct dav2_model_info {

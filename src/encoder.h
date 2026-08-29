@@ -7,7 +7,6 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace dav2 {
@@ -27,7 +26,7 @@ public:
         VulkanContext& context,
         GpuModel& weights,
         VulkanOperators& operators,
-        bool force_fp32_weights,
+        inferbridge::native::Precision precision,
         bool force_fp32_attention);
 
     void prepare(std::uint32_t width, std::uint32_t height);
@@ -39,13 +38,16 @@ public:
 
 private:
     void select_linear_tile(std::uint32_t rows);
-    bool select_half_attention(
-        const VulkanBuffer& current,
-        VulkanBuffer& normalized,
-        VulkanBuffer& qkv,
-        VulkanBuffer& attention,
-        std::uint32_t tokens);
     const VulkanBuffer& linear_weight(const std::string& name) const;
+    void linear(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const std::string& weight_name,
+        const std::string& bias_name,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns,
+        bool gelu);
 
     dav2_encoder encoder_;
     VulkanContext& context_;
@@ -60,9 +62,9 @@ private:
     bool linear_vectorized_ = false;
     std::uint32_t linear_vector_tile_ = 0;
     bool linear_half_weight_ = false;
-    bool force_fp32_weights_ = false;
+    inferbridge::native::Precision precision_ =
+        inferbridge::native::Precision::fp32;
     bool force_fp32_attention_ = false;
-    std::unordered_map<std::uint32_t, bool> half_attention_by_tokens_;
 };
 
 }  // namespace dav2

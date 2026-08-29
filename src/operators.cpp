@@ -41,6 +41,11 @@
 #include "linear_vec16_gelu_spv.h"
 #include "linear_vec16_residual_spv.h"
 #include "linear_vec16_half_residual_spv.h"
+#include "pack_fp16_spv.h"
+#include "linear_vec16_fp16_spv.h"
+#include "reduce_row_absmax_spv.h"
+#include "quantize_rows_int8_spv.h"
+#include "linear_int8_tiled_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -299,6 +304,29 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       sigmoid_scale_(context.create_pipeline(
           dav2_sigmoid_scale_spv,
           dav2_sigmoid_scale_spv_size, 2, 8)) {
+    if (context_.compute_capabilities().fp16) {
+        pack_fp16_ = context_.create_pipeline(
+            dav2_pack_fp16_spv, dav2_pack_fp16_spv_size, 2, 4);
+        linear_vec16_fp16_ = context_.create_pipeline(
+            dav2_linear_vec16_fp16_spv,
+            dav2_linear_vec16_fp16_spv_size, 4, 12);
+        pack_fp16_.set_debug_name("pack_fp16");
+        linear_vec16_fp16_.set_debug_name("linear_vec16_fp16");
+    }
+    if (context_.compute_capabilities().packed_int8_dot) {
+        reduce_row_absmax_ = context_.create_pipeline(
+            dav2_reduce_row_absmax_spv,
+            dav2_reduce_row_absmax_spv_size, 2, 8);
+        quantize_rows_int8_ = context_.create_pipeline(
+            dav2_quantize_rows_int8_spv,
+            dav2_quantize_rows_int8_spv_size, 3, 8);
+        linear_int8_tiled_ = context_.create_pipeline(
+            dav2_linear_int8_tiled_spv,
+            dav2_linear_int8_tiled_spv_size, 6, 12);
+        reduce_row_absmax_.set_debug_name("reduce_row_absmax");
+        quantize_rows_int8_.set_debug_name("quantize_rows_int8");
+        linear_int8_tiled_.set_debug_name("linear_int8_tiled");
+    }
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -358,6 +386,122 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     normalize_metric_.set_debug_name("normalize_metric");
     relu_.set_debug_name("relu");
     sigmoid_scale_.set_debug_name("sigmoid_scale");
+}
+
+void VulkanOperators::linear_fp16(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& half_weight,
+    const VulkanBuffer& bias,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns,
+    bool gelu) {
+    if (!context_.compute_capabilities().fp16) {
+        throw std::runtime_error(
+            "native FP16 linear operation is unavailable on this Vulkan device");
+    }
+    if (rows == 0 || input_columns == 0 || output_columns == 0 ||
+        input_columns % 4 != 0) {
+        throw std::invalid_argument("invalid FP16 linear dimensions");
+    }
+    const std::uint64_t input_elements =
+        std::uint64_t(rows) * input_columns;
+    require_bytes(input, input_elements, "input");
+    require_half_elements(
+        half_weight,
+        std::uint64_t(output_columns) * input_columns,
+        "weight");
+    require_bytes(bias, output_columns, "bias");
+    require_bytes(output, std::uint64_t(rows) * output_columns, "output");
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        input_elements * sizeof(std::uint16_t));
+    struct Count { std::uint32_t count; } count{
+        static_cast<std::uint32_t>(input_elements)};
+    context_.dispatch(
+        pack_fp16_, {&packed_input, &input}, &count, sizeof(count),
+        divide_up(count.count, 256));
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t input_columns;
+        std::uint32_t output_columns;
+    } parameters{rows, input_columns, output_columns};
+    context_.dispatch(
+        linear_vec16_fp16_, {&output, &packed_input, &half_weight, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_columns, 64), divide_up(rows, 64));
+    if (gelu) {
+        struct GeluParameters { std::uint32_t count; } gelu_parameters{
+            rows * output_columns};
+        context_.dispatch(
+            gelu_, {&output, &output}, &gelu_parameters,
+            sizeof(gelu_parameters), divide_up(gelu_parameters.count, 256));
+    }
+}
+
+void VulkanOperators::linear_int8(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& int8_weight,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns,
+    bool gelu) {
+    if (!context_.compute_capabilities().packed_int8_dot) {
+        throw std::runtime_error(
+            "accelerated INT8 linear operation is unavailable on this Vulkan device");
+    }
+    if (rows == 0 || input_columns == 0 || output_columns == 0 ||
+        input_columns % 4 != 0) {
+        throw std::invalid_argument("invalid INT8 linear dimensions");
+    }
+    const std::uint64_t input_elements =
+        std::uint64_t(rows) * input_columns;
+    require_bytes(input, input_elements, "input");
+    const std::uint64_t packed_weight_words =
+        std::uint64_t(output_columns) * (input_columns / 4);
+    if (int8_weight.size() < packed_weight_words * sizeof(std::uint32_t)) {
+        throw std::invalid_argument("packed INT8 weight buffer is too small");
+    }
+    require_bytes(weight_scales, output_columns, "weight scale");
+    require_bytes(bias, output_columns, "bias");
+    require_bytes(output, std::uint64_t(rows) * output_columns, "output");
+    VulkanBuffer input_scales = context_.create_device_buffer(
+        std::uint64_t(rows) * sizeof(float));
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        std::uint64_t(rows) * (input_columns / 4) * sizeof(std::uint32_t));
+    struct QuantizeParameters {
+        std::uint32_t rows;
+        std::uint32_t columns;
+    } quantize_parameters{rows, input_columns};
+    context_.dispatch(
+        reduce_row_absmax_, {&input, &input_scales},
+        &quantize_parameters, sizeof(quantize_parameters), rows);
+    context_.dispatch(
+        quantize_rows_int8_, {&packed_input, &input, &input_scales},
+        &quantize_parameters, sizeof(quantize_parameters),
+        divide_up(rows * (input_columns / 4), 256));
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t input_columns;
+        std::uint32_t output_columns;
+    } parameters{rows, input_columns, output_columns};
+    context_.dispatch(
+        linear_int8_tiled_,
+        {&output, &packed_input, &int8_weight, &input_scales,
+         &weight_scales, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_columns, 64),
+        divide_up(rows, 56));
+    if (gelu) {
+        struct GeluParameters { std::uint32_t count; } gelu_parameters{
+            rows * output_columns};
+        context_.dispatch(
+            gelu_, {&output, &output}, &gelu_parameters,
+            sizeof(gelu_parameters), divide_up(gelu_parameters.count, 256));
+    }
 }
 
 void VulkanOperators::linear(

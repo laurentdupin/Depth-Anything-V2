@@ -8,6 +8,7 @@
 #include "operators.h"
 #include "vulkan.h"
 #include "inferbridge/native_harness_resource_lifetime.h"
+#include "inferbridge/native_harness_precision.h"
 
 #include <array>
 #include <atomic>
@@ -495,6 +496,21 @@ private:
 };
 #endif
 
+inferbridge::native::Precision execution_precision(
+    const VulkanContext& context,
+    std::uint32_t flags) {
+    using inferbridge::native::Precision;
+    Precision requested = inferbridge::native::requested_precision();
+    if ((flags & DAV2_CREATE_FORCE_FP32) != 0) requested = Precision::fp32;
+    if ((flags & DAV2_CREATE_FORCE_FP16) != 0) requested = Precision::fp16;
+    if ((flags & DAV2_CREATE_FORCE_INT8) != 0) requested = Precision::int8;
+    const auto& device = context.compute_capabilities();
+    return inferbridge::native::require_supported_precision(
+        requested,
+        {device.fp16, device.packed_int8_dot},
+        Precision::fp32);
+}
+
 class VulkanExecutor final : public Executor {
 public:
     VulkanExecutor(
@@ -506,19 +522,18 @@ public:
           context_(
               static_cast<std::uint32_t>(vulkan_device_index),
               encoder != DAV2_ENCODER_VITL),
-          weights_(model_, context_),
+          precision_(execution_precision(context_, flags)),
+          weights_(model_, context_, precision_),
           operators_(context_),
           preprocessor_(context_),
           encoder_(
               encoder, context_, weights_, operators_,
-              (flags & (DAV2_CREATE_FORCE_FP32 |
-                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0,
+              precision_,
               (flags & (DAV2_CREATE_FORCE_FP32 |
                         DAV2_CREATE_FORCE_FP32_ATTENTION)) != 0),
           dpt_(
               encoder, context_, weights_, operators_,
-              (flags & (DAV2_CREATE_FORCE_FP32 |
-                        DAV2_CREATE_FORCE_FP32_WEIGHTS)) != 0,
+              precision_,
               model_.derivation().metric_max_depth)
 #if defined(_WIN32)
           , d3d12_device_(
@@ -931,6 +946,8 @@ public:
 private:
     ModelFile model_;
     VulkanContext context_;
+    inferbridge::native::Precision precision_ =
+        inferbridge::native::Precision::fp32;
     GpuModel weights_;
     VulkanOperators operators_;
     GpuPreprocessor preprocessor_;

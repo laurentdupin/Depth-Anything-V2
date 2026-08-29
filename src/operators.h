@@ -37,6 +37,29 @@ public:
         std::uint32_t vector_tile,
         bool half_weight);
 
+    // Native arithmetic paths. Inputs are converted/quantized on-device and
+    // results remain FP32 so normalization, residuals, and public outputs keep
+    // their numerical range and ABI.
+    void linear_fp16(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns,
+        bool gelu);
+    void linear_int8(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& int8_weight,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns,
+        bool gelu);
+
     void layer_norm(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -168,6 +191,11 @@ private:
     VulkanPipeline linear_vec16_gelu_;
     VulkanPipeline linear_vec16_residual_;
     VulkanPipeline linear_vec16_half_residual_;
+    VulkanPipeline pack_fp16_;
+    VulkanPipeline linear_vec16_fp16_;
+    VulkanPipeline reduce_row_absmax_;
+    VulkanPipeline quantize_rows_int8_;
+    VulkanPipeline linear_int8_tiled_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;

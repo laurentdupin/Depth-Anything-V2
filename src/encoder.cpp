@@ -28,13 +28,13 @@ DinoEncoder::DinoEncoder(
     VulkanContext& context,
     GpuModel& weights,
     VulkanOperators& operators,
-    bool force_fp32_weights,
+    inferbridge::native::Precision precision,
     bool force_fp32_attention)
     : encoder_(encoder),
       context_(context),
       weights_(weights),
       operators_(operators),
-      force_fp32_weights_(force_fp32_weights),
+      precision_(precision),
       force_fp32_attention_(force_fp32_attention) {
     switch (encoder_) {
         case DAV2_ENCODER_VITS:
@@ -220,9 +220,7 @@ void DinoEncoder::select_linear_tile(std::uint32_t rows) {
             best_time = median;
         }
     }
-    Candidate* best = inferbridge::native::select_fp16_weights(
-        !force_fp32_weights_ && best_half_time < best_fp32_time * 0.995)
-        ? best_half : best_fp32;
+    Candidate* best = best_fp32;
     if (best->vectorized && best->vector_tile == 16) {
         for (Candidate& candidate : candidates) {
             if (candidate.half_weight == best->half_weight &&
@@ -237,14 +235,49 @@ void DinoEncoder::select_linear_tile(std::uint32_t rows) {
     linear_vectorized_ = best->vectorized;
     linear_vector_tile_ = best->vector_tile;
     linear_half_weight_ = best->half_weight;
-    weights_.retain_transformer_precision(linear_half_weight_);
+    weights_.retain_transformer_precision(precision_);
     linear_tile_selected_ = true;
 }
 
 const VulkanBuffer& DinoEncoder::linear_weight(
     const std::string& name) const {
     const GpuTensor& tensor = weights_.tensor(name);
-    return linear_half_weight_ ? tensor.half_buffer : tensor.buffer;
+    if (precision_ == inferbridge::native::Precision::fp16) {
+        return tensor.half_buffer;
+    }
+    if (precision_ == inferbridge::native::Precision::int8) {
+        return tensor.int8_buffer;
+    }
+    return tensor.buffer;
+}
+
+void DinoEncoder::linear(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const std::string& weight_name,
+    const std::string& bias_name,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns,
+    bool gelu) {
+    const GpuTensor& weight = weights_.tensor(weight_name);
+    const VulkanBuffer& bias = buffer(weights_, bias_name);
+    if (precision_ == inferbridge::native::Precision::fp16) {
+        operators_.linear_fp16(
+            output, input, weight.half_buffer, bias,
+            rows, input_columns, output_columns, gelu);
+        return;
+    }
+    if (precision_ == inferbridge::native::Precision::int8) {
+        operators_.linear_int8(
+            output, input, weight.int8_buffer, weight.int8_scales, bias,
+            rows, input_columns, output_columns, gelu);
+        return;
+    }
+    operators_.linear(
+        output, input, weight.buffer, bias,
+        rows, input_columns, output_columns, gelu,
+        linear_block16_, false, linear_vectorized_, linear_vector_tile_);
 }
 
 void DinoEncoder::prepare(
@@ -255,86 +288,13 @@ void DinoEncoder::prepare(
         throw std::invalid_argument(
             "encoder dimensions must be positive multiples of 14");
     }
-    if (!linear_tile_selected_) {
+    if (!linear_tile_selected_ &&
+        precision_ == inferbridge::native::Precision::fp32) {
         select_linear_tile((width / 14) * (height / 14) + 1);
+    } else if (!linear_tile_selected_) {
+        weights_.retain_transformer_precision(precision_);
+        linear_tile_selected_ = true;
     }
-}
-
-bool DinoEncoder::select_half_attention(
-    const VulkanBuffer& current,
-    VulkanBuffer& normalized,
-    VulkanBuffer& qkv,
-    VulkanBuffer& attention,
-    std::uint32_t tokens) {
-    context_.batch([&] {
-        operators_.layer_norm(
-            normalized,
-            current,
-            buffer(weights_, block_name(0, ".norm1.weight")),
-            buffer(weights_, block_name(0, ".norm1.bias")),
-            tokens,
-            embedding_,
-            1.0e-6f);
-        operators_.linear(
-            qkv,
-            normalized,
-            linear_weight(block_name(0, ".attn.qkv.weight")),
-            buffer(weights_, block_name(0, ".attn.qkv.bias")),
-            tokens,
-            embedding_,
-            embedding_ * 3,
-            false,
-            linear_block16_,
-            linear_half_weight_,
-            linear_vectorized_,
-            linear_vector_tile_);
-    });
-
-    VulkanBuffer fp32_scratch = context_.create_device_buffer(
-        std::uint64_t(heads_) * tokens * tokens * sizeof(float));
-    VulkanBuffer half_scratch = context_.create_device_buffer(
-        std::uint64_t(heads_) * tokens *
-        ((std::uint64_t(tokens) + 1) / 2) *
-        sizeof(std::uint32_t));
-    const std::uint32_t repetitions =
-        tokens < 256 ? 8 : (tokens < 768 ? 4 : 2);
-    const auto run = [&](bool half_scores) {
-        VulkanBuffer& scratch =
-            half_scores ? half_scratch : fp32_scratch;
-        const auto start = std::chrono::steady_clock::now();
-        context_.batch([&] {
-            for (std::uint32_t repetition = 0;
-                 repetition < repetitions;
-                 ++repetition) {
-                operators_.attention_head64(
-                    attention,
-                    qkv,
-                    tokens,
-                    heads_,
-                    &scratch,
-                    half_scores);
-            }
-        });
-        return std::chrono::duration<double, std::micro>(
-            std::chrono::steady_clock::now() - start).count();
-    };
-    run(false);
-    run(true);
-    std::array<double, 3> fp32_samples{};
-    std::array<double, 3> half_samples{};
-    for (std::size_t sample = 0; sample < fp32_samples.size(); ++sample) {
-        if ((sample & 1u) == 0) {
-            fp32_samples[sample] = run(false);
-            half_samples[sample] = run(true);
-        } else {
-            half_samples[sample] = run(true);
-            fp32_samples[sample] = run(false);
-        }
-    }
-    std::sort(fp32_samples.begin(), fp32_samples.end());
-    std::sort(half_samples.begin(), half_samples.end());
-    return half_samples[half_samples.size() / 2] <
-        fp32_samples[fp32_samples.size() / 2] * 0.99;
 }
 
 EncoderOutput DinoEncoder::forward(
@@ -375,22 +335,9 @@ EncoderOutput DinoEncoder::forward(
             height,
             embedding_);
     });
-    const auto existing_attention =
-        half_attention_by_tokens_.find(tokens);
-    const bool half_attention = inferbridge::native::select_fp16_weights(
-        force_fp32_attention_ ? false
-        : existing_attention != half_attention_by_tokens_.end()
-        ? existing_attention->second
-        : half_attention_by_tokens_
-              .emplace(
-                  tokens,
-                  select_half_attention(
-                      current,
-                      normalized,
-                      qkv,
-                      attention,
-                      tokens))
-              .first->second);
+    const bool half_attention =
+        precision_ == inferbridge::native::Precision::fp16 &&
+        !force_fp32_attention_;
     const VkDeviceSize attention_score_bytes = half_attention
         ? std::uint64_t(heads_) * tokens *
             ((std::uint64_t(tokens) + 1) / 2) *
@@ -430,19 +377,11 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 1.0e-6f);
-            operators_.linear(
-                qkv,
-                normalized,
-                linear_weight(block_name(block, ".attn.qkv.weight")),
-                buffer(weights_, block_name(block, ".attn.qkv.bias")),
-                tokens,
-                embedding_,
-                embedding_ * 3,
-                false,
-                linear_block16_,
-                linear_half_weight_,
-                linear_vectorized_,
-                linear_vector_tile_);
+            linear(
+                qkv, normalized,
+                block_name(block, ".attn.qkv.weight"),
+                block_name(block, ".attn.qkv.bias"),
+                tokens, embedding_, embedding_ * 3, false);
             operators_.attention_head64(
                 attention,
                 qkv,
@@ -450,7 +389,8 @@ EncoderOutput DinoEncoder::forward(
                 heads_,
                 &attention_scores,
                 half_attention);
-            if (linear_vectorized_ &&
+            if (precision_ == inferbridge::native::Precision::fp32 &&
+                linear_vectorized_ &&
                 (linear_vector_tile_ == 8 ||
                  linear_vector_tile_ == 16)) {
                 operators_.linear_residual_wide(
@@ -466,19 +406,11 @@ EncoderOutput DinoEncoder::forward(
                     linear_vector_tile_,
                     linear_half_weight_);
             } else {
-                operators_.linear(
-                    query,
-                    attention,
-                    linear_weight(block_name(block, ".attn.proj.weight")),
-                    buffer(weights_, block_name(block, ".attn.proj.bias")),
-                    tokens,
-                    embedding_,
-                    embedding_,
-                    false,
-                    linear_block16_,
-                    linear_half_weight_,
-                    linear_vectorized_,
-                    linear_vector_tile_);
+                linear(
+                    query, attention,
+                    block_name(block, ".attn.proj.weight"),
+                    block_name(block, ".attn.proj.bias"),
+                    tokens, embedding_, embedding_, false);
                 operators_.add_scaled(
                     next,
                     current,
@@ -497,20 +429,13 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 1.0e-6f);
-            operators_.linear(
-                hidden,
-                normalized,
-                linear_weight(block_name(block, ".mlp.fc1.weight")),
-                buffer(weights_, block_name(block, ".mlp.fc1.bias")),
-                tokens,
-                embedding_,
-                embedding_ * 4,
-                true,
-                linear_block16_,
-                linear_half_weight_,
-                linear_vectorized_,
-                linear_vector_tile_);
-            if (linear_vectorized_ &&
+            linear(
+                hidden, normalized,
+                block_name(block, ".mlp.fc1.weight"),
+                block_name(block, ".mlp.fc1.bias"),
+                tokens, embedding_, embedding_ * 4, true);
+            if (precision_ == inferbridge::native::Precision::fp32 &&
+                linear_vectorized_ &&
                 (linear_vector_tile_ == 8 ||
                  linear_vector_tile_ == 16)) {
                 operators_.linear_residual_wide(
@@ -526,19 +451,11 @@ EncoderOutput DinoEncoder::forward(
                     linear_vector_tile_,
                     linear_half_weight_);
             } else {
-                operators_.linear(
-                    query,
-                    hidden,
-                    linear_weight(block_name(block, ".mlp.fc2.weight")),
-                    buffer(weights_, block_name(block, ".mlp.fc2.bias")),
-                    tokens,
-                    embedding_ * 4,
-                    embedding_,
-                    false,
-                    linear_block16_,
-                    linear_half_weight_,
-                    linear_vectorized_,
-                    linear_vector_tile_);
+                linear(
+                    query, hidden,
+                    block_name(block, ".mlp.fc2.weight"),
+                    block_name(block, ".mlp.fc2.bias"),
+                    tokens, embedding_ * 4, embedding_, false);
                 operators_.add_scaled(
                     next,
                     current,

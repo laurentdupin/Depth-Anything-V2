@@ -226,6 +226,38 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
     device_name_ = properties.deviceName;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+    };
+    VkPhysicalDeviceShaderFloat16Int8Features float16_int8_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+        &integer_dot_features,
+    };
+    VkPhysicalDevice16BitStorageFeatures storage16_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+        &float16_int8_features,
+    };
+    VkPhysicalDeviceFeatures2 device_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        &storage16_features,
+    };
+    vkGetPhysicalDeviceFeatures2(physical_device_, &device_features);
+    compute_capabilities_.fp16 =
+        storage16_features.storageBuffer16BitAccess == VK_TRUE &&
+        float16_int8_features.shaderFloat16 == VK_TRUE;
+    VkPhysicalDeviceShaderIntegerDotProductProperties integer_dot_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 integer_dot_properties2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &integer_dot_properties,
+    };
+    vkGetPhysicalDeviceProperties2(
+        physical_device_, &integer_dot_properties2);
+    compute_capabilities_.packed_int8_dot =
+        integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
+        integer_dot_properties
+            .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -405,9 +437,36 @@ VulkanContext::VulkanContext(
         1,
         &priority,
     };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures enabled_integer_dot{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+        nullptr,
+        compute_capabilities_.packed_int8_dot ? VK_TRUE : VK_FALSE,
+    };
+    VkPhysicalDeviceShaderFloat16Int8Features enabled_float16_int8{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+        compute_capabilities_.packed_int8_dot
+            ? &enabled_integer_dot : nullptr,
+        compute_capabilities_.fp16 ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
+    };
+    VkPhysicalDevice16BitStorageFeatures enabled_storage16{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+        (compute_capabilities_.fp16 ||
+         compute_capabilities_.packed_int8_dot)
+            ? &enabled_float16_int8 : nullptr,
+        compute_capabilities_.fp16 ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
+        VK_FALSE,
+        VK_FALSE,
+    };
+    const void* enabled_feature_chain = compute_capabilities_.fp16
+        ? static_cast<const void*>(&enabled_storage16)
+        : compute_capabilities_.packed_int8_dot
+        ? static_cast<const void*>(&enabled_float16_int8)
+        : nullptr;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        nullptr,
+        enabled_feature_chain,
         0,
         1,
         &queue_info,

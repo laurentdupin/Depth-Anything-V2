@@ -839,6 +839,22 @@ void compare_reference(
             reference.data(),
             reference.size()),
         "dav2_infer_bgr8(reference)");
+    const auto reference_range_values =
+        std::minmax_element(reference.begin(), reference.end());
+    const float reference_minimum = *reference_range_values.first;
+    dav2_model_info info{};
+    info.struct_size = sizeof(info);
+    check(dav2_get_model_info(context, &info), "dav2_get_model_info(reference)");
+    const float normalization_span = info.is_metric != 0u
+        ? 25.0f - reference_minimum
+        : *reference_range_values.second - reference_minimum;
+    for (float& value : reference) {
+        value = normalization_span > 1.0e-12f
+            ? std::clamp(
+                (value - reference_minimum) / normalization_span,
+                0.0f, 1.0f)
+            : 0.0f;
+    }
     float maximum_difference = 0.0f;
     std::size_t maximum_index = 0;
     float reference_range =
@@ -906,6 +922,42 @@ std::string harness_parameters(dav2_encoder encoder) {
         encoder == DAV2_ENCODER_VITB ? "vitb" : "vits";
     return std::string("{\"Encoder\":\"") + name +
         "\",\"Size\":\"140\"}";
+}
+
+struct HarnessOutput {
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<ID3D12Fence> fence;
+    HANDLE texture_handle = nullptr;
+    HANDLE fence_handle = nullptr;
+    std::uint64_t fence_value = 1u;
+};
+
+HarnessOutput create_harness_output(
+    ID3D12Device* device,
+    std::uint32_t width,
+    std::uint32_t height) {
+    HarnessOutput output;
+    const D3D12_HEAP_PROPERTIES heap{
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN, 1, 1};
+    const D3D12_RESOURCE_DESC texture{
+        D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, width, height, 1, 1,
+        DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
+    check(device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_SHARED, &texture,
+        D3D12_RESOURCE_STATE_COMMON, nullptr,
+        IID_PPV_ARGS(&output.texture)), "CreateCommittedResource(harness output)");
+    check(device->CreateSharedHandle(
+        output.texture.Get(), nullptr, GENERIC_ALL, nullptr,
+        &output.texture_handle), "CreateSharedHandle(harness output)");
+    check(device->CreateFence(
+        0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&output.fence)),
+        "CreateFence(harness output)");
+    check(device->CreateSharedHandle(
+        output.fence.Get(), nullptr, GENERIC_ALL, nullptr,
+        &output.fence_handle), "CreateSharedHandle(harness output fence)");
+    return output;
 }
 
 }  // namespace
@@ -1485,13 +1537,52 @@ int main() try {
     harness_wait.native_handle = reinterpret_cast<std::uintptr_t>(
         harness_input.fence_handle);
     harness_wait.value = harness_input.fence_value;
+    HarnessOutput harness_target =
+        create_harness_output(device.Get(), width, height);
+    ibrh_transfer_binding harness_input_binding{};
+    harness_input_binding.struct_size = sizeof(harness_input_binding);
+    harness_input_binding.api_version = IBRH_CURRENT_API_VERSION;
+    harness_input_binding.resource = harness_resource;
+    harness_input_binding.synchronization = harness_wait;
+    ibrh_transfer_binding harness_output_binding{};
+    harness_output_binding.struct_size = sizeof(harness_output_binding);
+    harness_output_binding.api_version = IBRH_CURRENT_API_VERSION;
+    auto& harness_output_resource = harness_output_binding.resource;
+    harness_output_resource.struct_size = sizeof(harness_output_resource);
+    harness_output_resource.api_version = IBRH_CURRENT_API_VERSION;
+    harness_output_resource.domain = IBRH_RESOURCE_DOMAIN_D3D12;
+    harness_output_resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
+    harness_output_resource.access = IBRH_RESOURCE_ACCESS_WRITE;
+    dav2_model_info model_info{};
+    model_info.struct_size = sizeof(model_info);
+    check(dav2_get_model_info(context, &model_info), "dav2_get_model_info");
+    const std::uint32_t expected_pixel_format = model_info.is_metric != 0u
+        ? IBRH_PIXEL_DEPTH_METRIC_FLOAT32
+        : IBRH_PIXEL_DEPTH_FLOAT32;
+    harness_output_resource.pixel_format = expected_pixel_format;
+    harness_output_resource.width = width;
+    harness_output_resource.height = height;
+    harness_output_resource.depth = 1u;
+    harness_output_resource.native_handle_type =
+        IBRH_NATIVE_HANDLE_WIN32_SHARED;
+    harness_output_resource.native_handle =
+        reinterpret_cast<std::uintptr_t>(harness_target.texture_handle);
+    auto& harness_signal = harness_output_binding.synchronization;
+    harness_signal.struct_size = sizeof(harness_signal);
+    harness_signal.api_version = IBRH_CURRENT_API_VERSION;
+    harness_signal.kind = IBRH_SYNC_D3D12_FENCE;
+    harness_signal.operation = IBRH_SYNC_SIGNAL;
+    harness_signal.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
+    harness_signal.native_handle =
+        reinterpret_cast<std::uintptr_t>(harness_target.fence_handle);
+    harness_signal.value = harness_target.fence_value;
     ibrh_submit_request harness_submit{};
     harness_submit.struct_size = sizeof(harness_submit);
     harness_submit.api_version = IBRH_CURRENT_API_VERSION;
-    harness_submit.inputs = &harness_resource;
+    harness_submit.inputs = &harness_input_binding;
     harness_submit.input_count = 1u;
-    harness_submit.synchronizations = &harness_wait;
-    harness_submit.synchronization_count = 1u;
+    harness_submit.outputs = &harness_output_binding;
+    harness_submit.output_count = 1u;
     harness_submit.source_frame_id = 12000u;
     harness_submit.timestamp_ns = 423456789u;
     harness_submit.parameters_json = {
@@ -1509,49 +1600,18 @@ int main() try {
     harness_input.resource.Reset();
     harness_input.ready.Reset();
 
-    ibrh_output_descriptor harness_output{};
-    ibrh_output_lease* harness_lease = nullptr;
-    check(
-        harness.output_acquire(
-            harness_job, 0u, sizeof(harness_output), &harness_output,
-            &harness_lease),
-        "ibrh output_acquire D3D12 texture");
-    dav2_model_info model_info{};
-    model_info.struct_size = sizeof(model_info);
-    check(dav2_get_model_info(context, &model_info), "dav2_get_model_info");
-    const std::uint32_t expected_pixel_format = model_info.is_metric != 0u
-        ? IBRH_PIXEL_DEPTH_METRIC_FLOAT32
-        : IBRH_PIXEL_DEPTH_FLOAT32;
-    if (harness_output.source_frame_id !=
-            harness_submit.source_frame_id ||
-        harness_output.timestamp_ns != harness_submit.timestamp_ns ||
-        harness_output.payload_type != expected_pixel_format ||
-        harness_output.resource.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
-        harness_output.resource.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
-        harness_output.resource.pixel_format != expected_pixel_format ||
-        harness_output.resource.width != width ||
-        harness_output.resource.height != height ||
-        harness_output.resource.native_handle_type !=
-            IBRH_NATIVE_HANDLE_WIN32_SHARED ||
-        harness_output.ready.kind != IBRH_SYNC_D3D12_FENCE ||
-        harness_output.ready.operation != IBRH_SYNC_WAIT ||
-        harness_output.ready.native_handle_type !=
-            IBRH_NATIVE_HANDLE_WIN32_SHARED) {
-        throw std::runtime_error(
-            "InferBridge GPU output descriptor or correlation failed");
-    }
     dav2_d3d12_texture_output_descriptor harness_native_output{};
     harness_native_output.struct_size = sizeof(harness_native_output);
     harness_native_output.shared_texture_handle =
-        harness_output.resource.native_handle;
-    harness_native_output.width = harness_output.resource.width;
-    harness_native_output.height = harness_output.resource.height;
+        harness_output_resource.native_handle;
+    harness_native_output.width = harness_output_resource.width;
+    harness_native_output.height = harness_output_resource.height;
     harness_native_output.pixel_format = DAV2_GPU_PIXEL_DEPTH_FLOAT32;
     harness_native_output.ready_fence_handle =
-        harness_output.ready.native_handle;
-    harness_native_output.ready_fence_value = harness_output.ready.value;
-    harness_native_output.source_frame_id = harness_output.source_frame_id;
-    harness_native_output.timestamp_ns = harness_output.timestamp_ns;
+        harness_signal.native_handle;
+    harness_native_output.ready_fence_value = harness_signal.value;
+    harness_native_output.source_frame_id = harness_submit.source_frame_id;
+    harness_native_output.timestamp_ns = harness_submit.timestamp_ns;
     wait_depth_texture_ready(device.Get(), harness_native_output);
     ibrh_job_status harness_status{};
     harness_status.struct_size = sizeof(harness_status);
@@ -1572,9 +1632,12 @@ int main() try {
     validate_depth(harness_depth);
     compare_reference(
         context, harness_pixels, width, height, harness_depth);
-    harness.output_release(harness_lease);
+    CloseHandle(harness_target.texture_handle);
+    CloseHandle(harness_target.fence_handle);
+    harness_target.texture_handle = nullptr;
+    harness_target.fence_handle = nullptr;
     std::cout
-        << "InferBridge shared texture/fence graph and shutdown lease passed\n";
+        << "InferBridge caller-owned texture/fence graph passed\n";
 
     // Hold the imported wait unsignaled so cancellation is deterministic.
     const std::vector<std::uint8_t> pixels =

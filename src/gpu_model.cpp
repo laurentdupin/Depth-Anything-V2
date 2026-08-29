@@ -1,6 +1,8 @@
 #include "gpu_model.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -27,6 +29,11 @@ bool use_half_weight(std::string_view name) {
     }
     return name.find(".attn.") != std::string_view::npos ||
         name.find(".mlp.") != std::string_view::npos;
+}
+
+bool use_int8_weight(std::string_view name, const TensorView& tensor) {
+    return use_half_weight(name) && tensor.rank == 2 &&
+        tensor.dimensions[0] != 0 && tensor.dimensions[1] % 4 == 0;
 }
 
 std::uint16_t float_to_half(float input) {
@@ -105,7 +112,10 @@ std::uint32_t crc32(const void* data, std::size_t bytes) {
     return value ^ 0xffffffffu;
 }
 
-GpuModel::GpuModel(const ModelFile& model, VulkanContext& context)
+GpuModel::GpuModel(
+    const ModelFile& model,
+    VulkanContext& context,
+    inferbridge::native::Precision precision)
     : context_(context) {
     tensors_.reserve(model.tensor_count());
     for (std::string_view name : model.tensor_names()) {
@@ -125,12 +135,16 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context)
         GpuTensor destination{
             context.create_device_buffer(bytes),
             {},
+            {},
+            {},
             source.dimensions,
             source.rank,
             source.elements,
         };
         context.upload(destination.buffer, source.data, bytes);
-        if (use_half_weight(name)) {
+        if (use_half_weight(name) &&
+            (precision != inferbridge::native::Precision::int8 ||
+             name.rfind("depth_head.", 0) == 0)) {
             const auto* floats =
                 static_cast<const float*>(source.data);
             std::vector<std::uint32_t> packed(
@@ -151,6 +165,51 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context)
                 packed.data(),
                 packed.size() * sizeof(std::uint32_t));
         }
+        if (precision == inferbridge::native::Precision::int8 &&
+            use_int8_weight(name, source)) {
+            const auto* floats = source.data;
+            const std::size_t output_columns =
+                static_cast<std::size_t>(source.dimensions[0]);
+            const std::size_t input_columns =
+                static_cast<std::size_t>(source.dimensions[1]);
+            std::vector<float> scales(output_columns, 1.0e-8f);
+            std::vector<std::uint32_t> packed(
+                output_columns * (input_columns / 4), 0u);
+            for (std::size_t output = 0; output < output_columns; ++output) {
+                float maximum = 0.0f;
+                for (std::size_t input = 0; input < input_columns; ++input) {
+                    maximum = std::max(
+                        maximum,
+                        std::abs(floats[output * input_columns + input]));
+                }
+                const float scale = std::max(maximum / 127.0f, 1.0e-8f);
+                scales[output] = scale;
+                for (std::size_t input = 0; input < input_columns; input += 4) {
+                    std::uint32_t word = 0u;
+                    for (std::size_t lane = 0; lane < 4; ++lane) {
+                        const float normalized = floats[
+                            output * input_columns + input + lane] / scale;
+                        const int quantized = static_cast<int>(std::nearbyint(
+                            std::max(-127.0f, std::min(127.0f, normalized))));
+                        word |= (static_cast<std::uint32_t>(quantized) & 0xffu)
+                            << (lane * 8u);
+                    }
+                    packed[output * (input_columns / 4) + input / 4] = word;
+                }
+            }
+            destination.int8_buffer = context.create_device_buffer(
+                packed.size() * sizeof(std::uint32_t));
+            destination.int8_scales = context.create_device_buffer(
+                scales.size() * sizeof(float));
+            context.upload(
+                destination.int8_buffer,
+                packed.data(),
+                packed.size() * sizeof(std::uint32_t));
+            context.upload(
+                destination.int8_scales,
+                scales.data(),
+                scales.size() * sizeof(float));
+        }
         if (!tensors_.emplace(name, std::move(destination)).second) {
             throw std::runtime_error(
                 "duplicate GPU tensor name: " + std::string(name));
@@ -167,7 +226,8 @@ const GpuTensor& GpuModel::tensor(std::string_view name) const {
     return found->second;
 }
 
-void GpuModel::retain_transformer_precision(bool half_weight) {
+void GpuModel::retain_transformer_precision(
+    inferbridge::native::Precision precision) {
     for (auto& entry : tensors_) {
         const std::string_view name = entry.first;
         if (name.rfind("pretrained.blocks.", 0) != 0 ||
@@ -178,8 +238,16 @@ void GpuModel::retain_transformer_precision(bool half_weight) {
             continue;
         }
         GpuTensor& tensor = entry.second;
-        context_.discard(
-            half_weight ? tensor.buffer : tensor.half_buffer);
+        if (precision != inferbridge::native::Precision::fp32) {
+            context_.discard(tensor.buffer);
+        }
+        if (precision != inferbridge::native::Precision::fp16) {
+            context_.discard(tensor.half_buffer);
+        }
+        if (precision != inferbridge::native::Precision::int8) {
+            context_.discard(tensor.int8_buffer);
+            context_.discard(tensor.int8_scales);
+        }
     }
 }
 
