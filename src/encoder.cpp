@@ -342,9 +342,13 @@ EncoderOutput DinoEncoder::forward(
             precision_);
     });
     const inferbridge::native::Precision attention_precision =
-        force_fp32_attention_ ||
-            precision_ == inferbridge::native::Precision::int8
-        ? inferbridge::native::Precision::fp32 : precision_;
+        force_fp32_attention_
+        ? inferbridge::native::Precision::fp32
+        : precision_ == inferbridge::native::Precision::int8
+            ? (context_.compute_capabilities().fp16
+                ? inferbridge::native::Precision::fp16
+                : inferbridge::native::Precision::fp32)
+            : precision_;
     const VkDeviceSize attention_score_bytes =
         attention_precision == inferbridge::native::Precision::fp16
         ? std::uint64_t(heads_) * tokens *

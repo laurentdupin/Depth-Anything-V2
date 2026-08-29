@@ -49,8 +49,7 @@
 #include "linear_vec16_half_residual_spv.h"
 #include "pack_fp16_spv.h"
 #include "linear_vec16_fp16_spv.h"
-#include "reduce_row_absmax_spv.h"
-#include "quantize_rows_int8_spv.h"
+#include "quantize_rows_int8_fused_spv.h"
 #include "linear_int8_tiled_spv.h"
 #include "prepare_tokens_spv.h"
 #include "prepare_tokens_fp16_spv.h"
@@ -328,12 +327,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         linear_vec16_fp16_.set_debug_name("linear_vec16_fp16");
     }
     if (context_.compute_capabilities().packed_int8_dot) {
-        reduce_row_absmax_ = context_.create_pipeline(
-            dav2_reduce_row_absmax_spv,
-            dav2_reduce_row_absmax_spv_size, 2, 12);
-        quantize_rows_int8_ = context_.create_pipeline(
-            dav2_quantize_rows_int8_spv,
-            dav2_quantize_rows_int8_spv_size, 3, 12);
+        quantize_rows_int8_fused_ = context_.create_pipeline(
+            dav2_quantize_rows_int8_fused_spv,
+            dav2_quantize_rows_int8_fused_spv_size, 3, 12);
         linear_int8_tiled_ = context_.create_pipeline(
             dav2_linear_int8_tiled_spv,
             dav2_linear_int8_tiled_spv_size, 6, 28);
@@ -343,8 +339,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         conv_transpose_int8_ = context_.create_pipeline(
             dav2_conv_transpose_int8_spv,
             dav2_conv_transpose_int8_spv_size, 6, 20);
-        reduce_row_absmax_.set_debug_name("reduce_row_absmax");
-        quantize_rows_int8_.set_debug_name("quantize_rows_int8");
+        quantize_rows_int8_fused_.set_debug_name(
+            "quantize_rows_int8_fused");
         linear_int8_tiled_.set_debug_name("linear_int8_tiled");
         im2col_quantize_int8_.set_debug_name("im2col_quantize_int8");
         conv_transpose_int8_.set_debug_name("conv_transpose_int8");
@@ -537,12 +533,9 @@ void VulkanOperators::linear_int8(
         std::uint32_t input_offset;
     } quantize_parameters{rows, input_columns, 0u};
     context_.dispatch(
-        reduce_row_absmax_, {&input, &input_scales},
+        quantize_rows_int8_fused_,
+        {&packed_input, &input, &input_scales},
         &quantize_parameters, sizeof(quantize_parameters), rows);
-    context_.dispatch(
-        quantize_rows_int8_, {&packed_input, &input, &input_scales},
-        &quantize_parameters, sizeof(quantize_parameters),
-        divide_up(rows * (input_columns / 4), 256));
     linear_int8_packed(
         output, packed_input, int8_weight, input_scales, weight_scales,
         bias, rows, input_columns, output_columns, 0u, rows, false, true);
@@ -1196,12 +1189,9 @@ void VulkanOperators::project_tokens_int8(
         std::uint32_t input_offset;
     } quantize_parameters{spatial, embedding, embedding};
     context_.dispatch(
-        reduce_row_absmax_, {&tokens, &input_scales},
+        quantize_rows_int8_fused_,
+        {&packed_input, &tokens, &input_scales},
         &quantize_parameters, sizeof(quantize_parameters), spatial);
-    context_.dispatch(
-        quantize_rows_int8_, {&packed_input, &tokens, &input_scales},
-        &quantize_parameters, sizeof(quantize_parameters),
-        divide_up(spatial * (embedding / 4u), 256));
     linear_int8_packed(
         output, packed_input, int8_weight, input_scales, weight_scales,
         bias, spatial, embedding, output_channels, 0u, spatial, true, true);

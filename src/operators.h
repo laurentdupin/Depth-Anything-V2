@@ -283,8 +283,7 @@ private:
     VulkanPipeline linear_vec16_half_residual_;
     VulkanPipeline pack_fp16_;
     VulkanPipeline linear_vec16_fp16_;
-    VulkanPipeline reduce_row_absmax_;
-    VulkanPipeline quantize_rows_int8_;
+    VulkanPipeline quantize_rows_int8_fused_;
     VulkanPipeline linear_int8_tiled_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
