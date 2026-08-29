@@ -37,6 +37,9 @@ struct VulkanSubmission::Resources {
     std::vector<VulkanDeferredBuffer> deferred_buffers;
     VulkanSemaphore wait;
     VulkanSemaphore signal;
+    VkQueryPool profile_query_pool = VK_NULL_HANDLE;
+    std::uint32_t profile_query_count = 0;
+    std::vector<VulkanProfileRange> profile_ranges;
 };
 
 void VulkanContext::check(VkResult result, const char* operation) {
@@ -419,6 +422,10 @@ VulkanContext::VulkanContext(
         profile_environment[0] != '\0' &&
         profile_environment[0] != '0' &&
         family->timestampValidBits != 0;
+    if (const char* skip =
+            std::getenv("DAV2_VULKAN_PROFILE_SKIP_BATCHES")) {
+        profile_skip_batches_ = std::strtoull(skip, nullptr, 10);
+    }
     timestamp_period_ns_ = properties.limits.timestampPeriod;
 
     // Inference is throughput work. Keep room for latency-sensitive rendering
@@ -603,10 +610,40 @@ void VulkanContext::record_profile(
     const std::string& name = pipeline.debug_name_.empty()
         ? std::string("unnamed")
         : pipeline.debug_name_;
+    record_profile(name, ticks);
+}
+
+void VulkanContext::record_profile(
+    const std::string& name,
+    std::uint64_t ticks) {
     ProfileStat& stat = profile_stats_[name];
     stat.total_ticks += ticks;
     stat.maximum_ticks = std::max(stat.maximum_ticks, ticks);
     ++stat.dispatches;
+}
+
+void VulkanContext::collect_batch_profile(
+    VkQueryPool query_pool,
+    std::uint32_t query_count,
+    const std::vector<VulkanProfileRange>& ranges) noexcept {
+    if (query_pool == VK_NULL_HANDLE || query_count == 0) return;
+    std::vector<std::uint64_t> timestamps(query_count);
+    const VkResult result = vkGetQueryPoolResults(
+        device_, query_pool, 0, query_count,
+        timestamps.size() * sizeof(std::uint64_t), timestamps.data(),
+        sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT |
+            VK_QUERY_RESULT_WAIT_BIT);
+    if (result == VK_SUCCESS) {
+        for (const VulkanProfileRange& range : ranges) {
+            if (range.begin < query_count && range.end < query_count &&
+                timestamps[range.end] >= timestamps[range.begin]) {
+                record_profile(
+                    range.name,
+                    timestamps[range.end] - timestamps[range.begin]);
+            }
+        }
+    }
+    vkDestroyQueryPool(device_, query_pool, nullptr);
 }
 
 void VulkanContext::print_profile() const noexcept {
@@ -642,6 +679,14 @@ void VulkanContext::print_profile() const noexcept {
             static_cast<unsigned long long>(stat.dispatches),
             average_ms,
             maximum_ms);
+        std::fprintf(
+            stderr,
+            "DAV2_VULKAN_PROFILE_JSON:{\"stage\":\"%s\","
+            "\"total_ms\":%.6f,\"count\":%llu,"
+            "\"average_ms\":%.6f,\"maximum_ms\":%.6f}\n",
+            name.c_str(), total_ms,
+            static_cast<unsigned long long>(stat.dispatches),
+            average_ms, maximum_ms);
     }
 }
 
@@ -1237,6 +1282,24 @@ void VulkanContext::begin_batch() {
     batch_buffer_access_.clear();
     batch_image_access_.clear();
     batch_image_layout_.clear();
+    batch_profile_query_count_ = 0;
+    batch_profile_ranges_.clear();
+    ++profile_batch_index_;
+    if (profile_dispatches_ &&
+        profile_batch_index_ > profile_skip_batches_) {
+        constexpr std::uint32_t query_capacity = 8192;
+        const VkQueryPoolCreateInfo query_pool_info{
+            VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0,
+            VK_QUERY_TYPE_TIMESTAMP, query_capacity, 0};
+        check(vkCreateQueryPool(device_, &query_pool_info, nullptr,
+                                &batch_profile_query_pool_),
+              "vkCreateQueryPool(batch)");
+        vkCmdResetQueryPool(
+            batch_command_, batch_profile_query_pool_, 0, query_capacity);
+        vkCmdWriteTimestamp(
+            batch_command_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            batch_profile_query_pool_, batch_profile_query_count_++);
+    }
 }
 
 void VulkanContext::release_batch_resources() noexcept {
@@ -1268,6 +1331,18 @@ VulkanSubmission VulkanContext::end_batch_async(
     resources->deferred_buffers = std::move(batch_deferred_buffers_);
     resources->wait = std::move(wait);
     resources->signal = std::move(signal);
+    if (batch_profile_query_pool_ != VK_NULL_HANDLE) {
+        const std::uint32_t end = batch_profile_query_count_++;
+        vkCmdWriteTimestamp(
+            batch_command_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            batch_profile_query_pool_, end);
+        resources->profile_query_pool = batch_profile_query_pool_;
+        resources->profile_query_count = batch_profile_query_count_;
+        resources->profile_ranges = std::move(batch_profile_ranges_);
+        resources->profile_ranges.push_back({"batch_total", 0u, end});
+        batch_profile_query_pool_ = VK_NULL_HANDLE;
+        batch_profile_query_count_ = 0;
+    }
     VkCommandBuffer command = batch_command_;
     batch_command_ = VK_NULL_HANDLE;
     batch_has_dispatch_ = false;
@@ -1288,6 +1363,11 @@ VulkanSubmission VulkanContext::end_batch_async(
              resources->deferred_buffers) {
             recycle_or_destroy(buffer);
         }
+        if (resources->profile_query_pool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(
+                device_, resources->profile_query_pool, nullptr);
+            resources->profile_query_pool = VK_NULL_HANDLE;
+        }
         throw;
     }
 }
@@ -1296,10 +1376,24 @@ void VulkanContext::end_batch() {
     if (batch_command_ == VK_NULL_HANDLE) {
         throw std::logic_error("no active Vulkan batch");
     }
+    VkQueryPool profile_pool = batch_profile_query_pool_;
+    std::uint32_t profile_count = batch_profile_query_count_;
+    std::vector<VulkanProfileRange> profile_ranges =
+        std::move(batch_profile_ranges_);
+    if (profile_pool != VK_NULL_HANDLE) {
+        const std::uint32_t end = profile_count++;
+        vkCmdWriteTimestamp(
+            batch_command_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            profile_pool, end);
+        profile_ranges.push_back({"batch_total", 0u, end});
+        batch_profile_query_pool_ = VK_NULL_HANDLE;
+        batch_profile_query_count_ = 0;
+    }
     VkCommandBuffer command = batch_command_;
     batch_command_ = VK_NULL_HANDLE;
     batch_has_dispatch_ = false;
     end_commands(command);
+    collect_batch_profile(profile_pool, profile_count, profile_ranges);
     release_batch_resources();
 }
 
@@ -1309,6 +1403,13 @@ void VulkanContext::cancel_batch() noexcept {
             device_, command_pool_, 1, &batch_command_);
         batch_command_ = VK_NULL_HANDLE;
     }
+    if (batch_profile_query_pool_ != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(
+            device_, batch_profile_query_pool_, nullptr);
+        batch_profile_query_pool_ = VK_NULL_HANDLE;
+    }
+    batch_profile_query_count_ = 0;
+    batch_profile_ranges_.clear();
     batch_has_dispatch_ = false;
     release_batch_resources();
 }
@@ -1847,6 +1948,18 @@ void VulkanContext::dispatch_resources(
         batched ? batch_command_ : begin_commands();
     const bool profile =
         !batched && profile_query_pool_ != VK_NULL_HANDLE;
+    std::uint32_t batch_profile_begin = 0;
+    std::uint32_t batch_profile_end = 0;
+    const bool profile_batch = batched &&
+        batch_profile_query_pool_ != VK_NULL_HANDLE &&
+        batch_profile_query_count_ + 2u <= 8192u;
+    if (profile_batch) {
+        batch_profile_begin = batch_profile_query_count_++;
+        batch_profile_end = batch_profile_query_count_++;
+        vkCmdWriteTimestamp(
+            command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            batch_profile_query_pool_, batch_profile_begin);
+    }
     if (profile) {
         vkCmdResetQueryPool(
             command, profile_query_pool_, 0, 2);
@@ -1998,6 +2111,14 @@ void VulkanContext::dispatch_resources(
             push_constants);
     }
     vkCmdDispatch(command, group_x, group_y, group_z);
+    if (profile_batch) {
+        vkCmdWriteTimestamp(
+            command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            batch_profile_query_pool_, batch_profile_end);
+        batch_profile_ranges_.push_back({
+            pipeline.debug_name_.empty() ? "unnamed" : pipeline.debug_name_,
+            batch_profile_begin, batch_profile_end});
+    }
     if (profile) {
         vkCmdWriteTimestamp(
             command,
@@ -2110,6 +2231,11 @@ void VulkanContext::destroy(VulkanSubmission& submission) noexcept {
 void VulkanContext::release_submission_resources(
     VulkanSubmission& submission) noexcept {
     if (submission.resources_ == nullptr) return;
+    collect_batch_profile(
+        submission.resources_->profile_query_pool,
+        submission.resources_->profile_query_count,
+        submission.resources_->profile_ranges);
+    submission.resources_->profile_query_pool = VK_NULL_HANDLE;
     for (const VulkanBatchedDescriptor& descriptor :
          submission.resources_->descriptor_sets) {
         if (descriptor.pipeline && descriptor.set) {

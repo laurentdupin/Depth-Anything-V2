@@ -55,6 +55,12 @@ struct VulkanExternalCapabilities {
     bool d3d12_r32_storage_image_import = false;
 };
 
+struct VulkanProfileRange {
+    std::string name;
+    std::uint32_t begin = 0;
+    std::uint32_t end = 0;
+};
+
 struct VulkanComputeCapabilities {
     // True only when 16-bit storage and native float16 shader arithmetic are
     // both available and enabled on the logical device.
@@ -282,10 +288,6 @@ public:
 
     template <typename Function>
     void batch(Function&& function) {
-        if (profile_dispatches_) {
-            std::forward<Function>(function)();
-            return;
-        }
         if (batch_command_ != VK_NULL_HANDLE) {
             std::forward<Function>(function)();
             return;
@@ -374,6 +376,13 @@ private:
     void record_profile(
         const VulkanPipeline& pipeline,
         std::uint64_t ticks);
+    void record_profile(
+        const std::string& name,
+        std::uint64_t ticks);
+    void collect_batch_profile(
+        VkQueryPool query_pool,
+        std::uint32_t query_count,
+        const std::vector<VulkanProfileRange>& ranges) noexcept;
     void print_profile() const noexcept;
 
     struct ProfileStat {
@@ -397,6 +406,11 @@ private:
     std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;
+    VkQueryPool batch_profile_query_pool_ = VK_NULL_HANDLE;
+    std::uint32_t batch_profile_query_count_ = 0;
+    std::vector<VulkanProfileRange> batch_profile_ranges_;
+    std::uint64_t profile_batch_index_ = 0;
+    std::uint64_t profile_skip_batches_ = 0;
     bool track_resource_hazards_ = true;
     std::vector<VulkanBatchedDescriptor> batch_descriptor_sets_;
     std::vector<VulkanDeferredBuffer> batch_deferred_buffers_;
