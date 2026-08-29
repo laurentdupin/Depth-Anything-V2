@@ -464,8 +464,11 @@ void VulkanOperators::linear_fp16(
         "weight");
     require_bytes(bias, output_columns, "bias");
     require_bytes(output, std::uint64_t(rows) * output_columns, "output");
-    VulkanBuffer packed_input = context_.create_device_buffer(
-        input_elements * sizeof(std::uint16_t));
+    VulkanBuffer& packed_input = fp16_workspace_.ensure(
+        input_elements * sizeof(std::uint16_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct Count { std::uint32_t count; } count{
         static_cast<std::uint32_t>(input_elements)};
     context_.dispatch(
@@ -518,10 +521,16 @@ void VulkanOperators::linear_int8(
     require_bytes(weight_scales, output_columns, "weight scale");
     require_bytes(bias, output_columns, "bias");
     require_bytes(output, std::uint64_t(rows) * output_columns, "output");
-    VulkanBuffer input_scales = context_.create_device_buffer(
-        std::uint64_t(rows) * sizeof(float));
-    VulkanBuffer packed_input = context_.create_device_buffer(
-        std::uint64_t(rows) * (input_columns / 4) * sizeof(std::uint32_t));
+    VulkanBuffer& input_scales = int8_workspace_.scales(
+        std::uint64_t(rows) * sizeof(float),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
+    VulkanBuffer& packed_input = int8_workspace_.packed(
+        std::uint64_t(rows) * (input_columns / 4) * sizeof(std::uint32_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct QuantizeParameters {
         std::uint32_t rows;
         std::uint32_t columns;
@@ -940,11 +949,17 @@ void VulkanOperators::prepare_tokens(
     if (precision == inferbridge::native::Precision::int8) {
         const std::uint32_t spatial = patch_width * patch_height;
         constexpr std::uint32_t patch_columns = 3u * 14u * 14u;
-        VulkanBuffer packed_input = context_.create_device_buffer(
+        VulkanBuffer& packed_input = int8_workspace_.packed(
             std::uint64_t(spatial) * (patch_columns / 4u) *
-            sizeof(std::uint32_t));
-        VulkanBuffer input_scales = context_.create_device_buffer(
-            std::uint64_t(spatial) * sizeof(float));
+                sizeof(std::uint32_t),
+            [this](std::uint64_t bytes) {
+                return context_.create_device_buffer(bytes);
+            });
+        VulkanBuffer& input_scales = int8_workspace_.scales(
+            std::uint64_t(spatial) * sizeof(float),
+            [this](std::uint64_t bytes) {
+                return context_.create_device_buffer(bytes);
+            });
         struct Im2colParameters {
             std::uint32_t input_width;
             std::uint32_t input_height;
@@ -1165,10 +1180,16 @@ void VulkanOperators::project_tokens_int8(
     require_bytes(weight_scales, output_channels, "weight scale");
     require_bytes(bias, output_channels, "bias");
     require_bytes(output, std::uint64_t(spatial) * output_channels, "output");
-    VulkanBuffer input_scales = context_.create_device_buffer(
-        std::uint64_t(spatial) * sizeof(float));
-    VulkanBuffer packed_input = context_.create_device_buffer(
-        std::uint64_t(spatial) * (embedding / 4u) * sizeof(std::uint32_t));
+    VulkanBuffer& input_scales = int8_workspace_.scales(
+        std::uint64_t(spatial) * sizeof(float),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
+    VulkanBuffer& packed_input = int8_workspace_.packed(
+        std::uint64_t(spatial) * (embedding / 4u) * sizeof(std::uint32_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct QuantizeParameters {
         std::uint32_t rows;
         std::uint32_t columns;
@@ -1390,10 +1411,16 @@ void VulkanOperators::conv2d_int8(
     require_bytes(weight_scales, output_channels, "convolution weight scale");
     require_bytes(bias, has_bias ? output_channels : 1u, "convolution bias");
     require_bytes(output, std::uint64_t(rows) * output_channels, "output");
-    VulkanBuffer packed_input = context_.create_device_buffer(
-        std::uint64_t(rows) * (inner / 4u) * sizeof(std::uint32_t));
-    VulkanBuffer input_scales = context_.create_device_buffer(
-        std::uint64_t(rows) * sizeof(float));
+    VulkanBuffer& packed_input = int8_workspace_.packed(
+        std::uint64_t(rows) * (inner / 4u) * sizeof(std::uint32_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
+    VulkanBuffer& input_scales = int8_workspace_.scales(
+        std::uint64_t(rows) * sizeof(float),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct Im2colParameters {
         std::uint32_t input_width;
         std::uint32_t input_height;
@@ -1543,10 +1570,16 @@ void VulkanOperators::conv_transpose_nonoverlap_int8(
     }
     require_bytes(weight_scales, weight_rows, "transposed weight scale");
     require_bytes(bias, output_channels, "transposed bias");
-    VulkanBuffer packed_input = context_.create_device_buffer(
-        std::uint64_t(input_rows) * packed_columns * sizeof(std::uint32_t));
-    VulkanBuffer input_scales = context_.create_device_buffer(
-        std::uint64_t(input_rows) * sizeof(float));
+    VulkanBuffer& packed_input = int8_workspace_.packed(
+        std::uint64_t(input_rows) * packed_columns * sizeof(std::uint32_t),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
+    VulkanBuffer& input_scales = int8_workspace_.scales(
+        std::uint64_t(input_rows) * sizeof(float),
+        [this](std::uint64_t bytes) {
+            return context_.create_device_buffer(bytes);
+        });
     struct Im2colParameters {
         std::uint32_t input_width;
         std::uint32_t input_height;

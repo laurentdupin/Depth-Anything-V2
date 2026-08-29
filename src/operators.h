@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vulkan.h"
+#include <inferbridge/native_harness_int8_workspace.h>
 #include "inferbridge/native_harness_precision.h"
 
 #include <cstdint>
@@ -263,6 +264,8 @@ private:
         bool output_transposed,
         bool has_bias);
     VulkanContext& context_;
+    inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
+    inferbridge::native::ReusableDeviceBuffer<VulkanBuffer> fp16_workspace_;
     VulkanPipeline linear_;
     VulkanPipeline linear16_;
     VulkanPipeline linear_half_;
