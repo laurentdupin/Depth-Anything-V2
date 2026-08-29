@@ -51,6 +51,22 @@ public:
         std::uint32_t input_columns,
         std::uint32_t output_columns,
         bool gelu);
+    void linear_fp16_half_output_gelu(
+        VulkanBuffer& half_output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns);
+    void linear_fp16_half_input(
+        VulkanBuffer& output,
+        const VulkanBuffer& half_input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns);
     void linear_int8(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -283,6 +299,7 @@ private:
     VulkanPipeline linear_vec16_half_residual_;
     VulkanPipeline pack_fp16_;
     VulkanPipeline linear_vec16_fp16_;
+    VulkanPipeline linear_vec16_fp16_output_gelu_;
     VulkanPipeline quantize_rows_int8_fused_;
     VulkanPipeline linear_int8_tiled_;
     VulkanPipeline gelu_;

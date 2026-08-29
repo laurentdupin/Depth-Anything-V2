@@ -10,9 +10,15 @@ layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 #endif
 
+#if defined(FP16_OUTPUT)
+layout(set = 0, binding = 0, std430) writeonly buffer Output {
+    f16vec4 data[];
+} output_buffer;
+#else
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
     float data[];
 } output_buffer;
+#endif
 #if defined(FP16_ARITHMETIC)
 #define DAV2_VEC4 f16vec4
 layout(set = 0, binding = 1, std430) readonly buffer Input {
@@ -173,6 +179,9 @@ void main() {
         if (output_row >= parameters.rows) {
             continue;
         }
+#if defined(FP16_OUTPUT)
+        f16vec4 packed_output = f16vec4(0.0);
+#endif
         for (uint column = 0; column < 4; ++column) {
             const uint output_column = column_base + column;
             if (output_column < parameters.output_columns) {
@@ -188,10 +197,21 @@ void main() {
                         output_column] +
                     value * scale_buffer.data[output_column];
 #endif
+#if defined(FP16_OUTPUT)
+                packed_output[column] = float16_t(value);
+#else
                 output_buffer.data[
                     output_row * parameters.output_columns + output_column] =
                     value;
+#endif
             }
         }
+#if defined(FP16_OUTPUT)
+        if (column_base < parameters.output_columns) {
+            output_buffer.data[
+                output_row * (parameters.output_columns / 4) +
+                column_base / 4] = packed_output;
+        }
+#endif
     }
 }

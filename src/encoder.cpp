@@ -322,7 +322,9 @@ EncoderOutput DinoEncoder::forward(
     VulkanBuffer qkv =
         context_.create_device_buffer(token_bytes * 3);
     VulkanBuffer hidden =
-        context_.create_device_buffer(token_bytes * 4);
+        context_.create_device_buffer(
+            precision_ == inferbridge::native::Precision::fp16
+            ? token_bytes * 2 : token_bytes * 4);
     context_.batch([&] {
         const GpuTensor& patch_weight =
             weights_.tensor("pretrained.patch_embed.proj.weight");
@@ -441,12 +443,35 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 embedding_,
                 1.0e-6f);
-            linear(
-                hidden, normalized,
-                block_name(block, ".mlp.fc1.weight"),
-                block_name(block, ".mlp.fc1.bias"),
-                tokens, embedding_, embedding_ * 4, true);
-            if (precision_ == inferbridge::native::Precision::fp32 &&
+            const std::string fc1_weight_name =
+                block_name(block, ".mlp.fc1.weight");
+            const std::string fc1_bias_name =
+                block_name(block, ".mlp.fc1.bias");
+            if (precision_ == inferbridge::native::Precision::fp16) {
+                const GpuTensor& fc1_weight = weights_.tensor(fc1_weight_name);
+                operators_.linear_fp16_half_output_gelu(
+                    hidden, normalized, fc1_weight.half_buffer,
+                    buffer(weights_, fc1_bias_name),
+                    tokens, embedding_, embedding_ * 4);
+            } else {
+                linear(
+                    hidden, normalized, fc1_weight_name, fc1_bias_name,
+                    tokens, embedding_, embedding_ * 4, true);
+            }
+            if (precision_ == inferbridge::native::Precision::fp16) {
+                const std::string fc2_weight_name =
+                    block_name(block, ".mlp.fc2.weight");
+                const GpuTensor& fc2_weight = weights_.tensor(fc2_weight_name);
+                operators_.linear_fp16_half_input(
+                    query, hidden, fc2_weight.half_buffer,
+                    buffer(weights_, block_name(block, ".mlp.fc2.bias")),
+                    tokens, embedding_ * 4, embedding_);
+                operators_.add_scaled(
+                    next, current, query,
+                    buffer(weights_, block_name(block, ".ls2.gamma")),
+                    static_cast<std::uint32_t>(token_elements),
+                    embedding_);
+            } else if (precision_ == inferbridge::native::Precision::fp32 &&
                 linear_vectorized_ &&
                 (linear_vector_tile_ == 8 ||
                  linear_vector_tile_ == 16)) {
