@@ -10,6 +10,7 @@ layout(set = 0, binding = 1, std430) writeonly buffer Scale {
 layout(push_constant) uniform Parameters {
     uint rows;
     uint columns;
+    uint input_offset;
 } parameters;
 shared float maxima[256];
 
@@ -20,7 +21,7 @@ void main() {
     float maximum = 0.0;
     for (uint column = lane; column < parameters.columns; column += 256u)
         maximum = max(maximum, abs(input_buffer.data[
-            row * parameters.columns + column]));
+            parameters.input_offset + row * parameters.columns + column]));
     maxima[lane] = maximum;
     barrier();
     for (uint step = 128u; step > 0u; step >>= 1u) {

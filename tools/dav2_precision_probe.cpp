@@ -95,7 +95,10 @@ int main(int argc, char** argv) {
         double mae = 0.0;
         double rmse = 0.0;
         double maximum_error = 0.0;
-        if (flags != DAV2_CREATE_FORCE_FP32) {
+        double normalized_mae = 0.0;
+        double normalized_rmse = 0.0;
+        double correlation = 0.0;
+        if ((flags & (DAV2_CREATE_FORCE_FP16 | DAV2_CREATE_FORCE_INT8)) != 0u) {
             options.flags = DAV2_CREATE_FORCE_FP32;
             dav2_context* reference_context = nullptr;
             const dav2_status reference_created =
@@ -109,15 +112,60 @@ int main(int argc, char** argv) {
             dav2_destroy(reference_context);
             if (reference_status != DAV2_STATUS_OK)
                 throw std::runtime_error(dav2_last_error());
+            const auto reference_range =
+                std::minmax_element(reference.begin(), reference.end());
+            const double output_span = std::max(
+                1.0e-12,
+                static_cast<double>(*range.second) - *range.first);
+            const double reference_span = std::max(
+                1.0e-12,
+                static_cast<double>(*reference_range.second) -
+                    *reference_range.first);
+            double output_mean = 0.0;
+            double reference_mean = 0.0;
             for (std::size_t index = 0; index < output.size(); ++index) {
                 const double error = std::abs(
                     static_cast<double>(output[index]) - reference[index]);
                 mae += error;
                 rmse += error * error;
                 maximum_error = std::max(maximum_error, error);
+                const double normalized_output =
+                    (output[index] - *range.first) / output_span;
+                const double normalized_reference =
+                    (reference[index] - *reference_range.first) /
+                    reference_span;
+                const double normalized_error =
+                    std::abs(normalized_output - normalized_reference);
+                normalized_mae += normalized_error;
+                normalized_rmse += normalized_error * normalized_error;
+                output_mean += normalized_output;
+                reference_mean += normalized_reference;
             }
             mae /= static_cast<double>(output.size());
             rmse = std::sqrt(rmse / static_cast<double>(output.size()));
+            normalized_mae /= static_cast<double>(output.size());
+            normalized_rmse = std::sqrt(
+                normalized_rmse / static_cast<double>(output.size()));
+            output_mean /= static_cast<double>(output.size());
+            reference_mean /= static_cast<double>(output.size());
+            double covariance = 0.0;
+            double output_variance = 0.0;
+            double reference_variance = 0.0;
+            for (std::size_t index = 0; index < output.size(); ++index) {
+                const double normalized_output =
+                    (output[index] - *range.first) / output_span;
+                const double normalized_reference =
+                    (reference[index] - *reference_range.first) /
+                    reference_span;
+                const double output_delta = normalized_output - output_mean;
+                const double reference_delta =
+                    normalized_reference - reference_mean;
+                covariance += output_delta * reference_delta;
+                output_variance += output_delta * output_delta;
+                reference_variance += reference_delta * reference_delta;
+            }
+            correlation = covariance / std::sqrt(std::max(
+                1.0e-24, output_variance * reference_variance));
         }
         std::cout << "precision=" << argv[3]
                   << " device=" << device
@@ -125,10 +173,13 @@ int main(int argc, char** argv) {
                   << " median_ms=" << milliseconds[milliseconds.size() / 2]
                   << " minimum=" << *range.first
                   << " maximum=" << *range.second;
-        if (flags != DAV2_CREATE_FORCE_FP32)
+        if ((flags & (DAV2_CREATE_FORCE_FP16 | DAV2_CREATE_FORCE_INT8)) != 0u)
             std::cout << " mae_vs_fp32=" << mae
                       << " rmse_vs_fp32=" << rmse
-                      << " max_error_vs_fp32=" << maximum_error;
+                      << " max_error_vs_fp32=" << maximum_error
+                      << " normalized_mae=" << normalized_mae
+                      << " normalized_rmse=" << normalized_rmse
+                      << " correlation=" << correlation;
         std::cout << '\n';
         return 0;
     } catch (const std::exception& error) {

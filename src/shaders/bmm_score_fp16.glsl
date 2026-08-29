@@ -1,0 +1,74 @@
+#version 450 core
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) writeonly buffer Output { uint data[]; } output_buffer;
+layout(set = 0, binding = 1, std430) readonly buffer Qkv { float data[]; } qkv_buffer;
+layout(push_constant) uniform Parameters { uint tokens; uint heads; } parameters;
+
+#define INNER_STRIDE 17
+shared float16_t query_tile[64 * INNER_STRIDE];
+shared float16_t key_tile[32 * INNER_STRIDE];
+
+void main() {
+    const uint column_base = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x * 4u;
+    const uint row_base = gl_WorkGroupID.y * 64u + gl_LocalInvocationID.y * 8u;
+    const uint head = gl_GlobalInvocationID.z;
+    const uint embedding = parameters.heads * 64u;
+    float sums[8][4];
+    for (uint row = 0u; row < 8u; ++row) {
+        for (uint column = 0u; column < 4u; ++column) sums[row][column] = 0.0;
+    }
+    const uint lane = gl_LocalInvocationID.y * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    for (uint inner_base = 0u; inner_base < 64u; inner_base += 16u) {
+        for (uint index = lane; index < 64u * 16u; index += 64u) {
+            const uint tile_row = index / 16u;
+            const uint inner = inner_base + index % 16u;
+            const uint token = gl_WorkGroupID.y * 64u + tile_row;
+            query_tile[tile_row * INNER_STRIDE + index % 16u] =
+                head < parameters.heads && token < parameters.tokens
+                ? float16_t(qkv_buffer.data[token * embedding * 3u + head * 64u + inner] * 0.125)
+                : float16_t(0.0);
+        }
+        for (uint index = lane; index < 32u * 16u; index += 64u) {
+            const uint tile_column = index / 16u;
+            const uint inner = inner_base + index % 16u;
+            const uint token = gl_WorkGroupID.x * 32u + tile_column;
+            key_tile[tile_column * INNER_STRIDE + index % 16u] =
+                head < parameters.heads && token < parameters.tokens
+                ? float16_t(qkv_buffer.data[token * embedding * 3u + embedding + head * 64u + inner])
+                : float16_t(0.0);
+        }
+        barrier();
+        for (uint inner = 0u; inner < 16u; ++inner) {
+            float16_t query_values[8];
+            float16_t key_values[4];
+            for (uint row = 0u; row < 8u; ++row) {
+                query_values[row] = query_tile[(gl_LocalInvocationID.y * 8u + row) * INNER_STRIDE + inner];
+            }
+            for (uint column = 0u; column < 4u; ++column) {
+                key_values[column] = key_tile[(gl_LocalInvocationID.x * 4u + column) * INNER_STRIDE + inner];
+            }
+            for (uint row = 0u; row < 8u; ++row) {
+                for (uint column = 0u; column < 4u; ++column) {
+                    sums[row][column] += float(query_values[row] * key_values[column]);
+                }
+            }
+        }
+        barrier();
+    }
+    const uint packed_columns = (parameters.tokens + 1u) >> 1u;
+    for (uint row = 0u; row < 8u; ++row) {
+        const uint output_row = row_base + row;
+        if (output_row >= parameters.tokens || head >= parameters.heads) continue;
+        for (uint column = 0u; column < 4u; column += 2u) {
+            const uint output_column = column_base + column;
+            if (output_column < parameters.tokens) {
+                const float high = output_column + 1u < parameters.tokens ? sums[row][column + 1u] : 0.0;
+                output_buffer.data[(head * parameters.tokens + output_row) * packed_columns + output_column / 2u] =
+                    packHalf2x16(vec2(sums[row][column], high));
+            }
+        }
+    }
+}

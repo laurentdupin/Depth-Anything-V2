@@ -28,6 +28,40 @@ float cubic2(float x) {
     return ((a * x - 5.0f * a) * x + 8.0f * a) * x - 4.0f * a;
 }
 
+struct PackedRows {
+    std::vector<std::uint32_t> values;
+    std::vector<float> scales;
+};
+
+PackedRows pack_rows(
+    const std::vector<float>& values,
+    std::size_t rows,
+    std::size_t columns) {
+    assert(columns % 4u == 0u && values.size() == rows * columns);
+    PackedRows result{
+        std::vector<std::uint32_t>(rows * columns / 4u),
+        std::vector<float>(rows)};
+    for (std::size_t row = 0; row < rows; ++row) {
+        float maximum = 0.0f;
+        for (std::size_t column = 0; column < columns; ++column)
+            maximum = std::max(maximum, std::abs(values[row * columns + column]));
+        const float scale = std::max(maximum / 127.0f, 1.0e-8f);
+        result.scales[row] = scale;
+        for (std::size_t column = 0; column < columns; column += 4u) {
+            std::uint32_t packed = 0u;
+            for (std::size_t component = 0; component < 4u; ++component) {
+                const int quantized = static_cast<int>(std::nearbyint(
+                    std::clamp(values[row * columns + column + component] /
+                        scale, -127.0f, 127.0f)));
+                packed |= (static_cast<std::uint32_t>(quantized) & 0xffu) <<
+                    (component * 8u);
+            }
+            result.values[row * (columns / 4u) + column / 4u] = packed;
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -105,6 +139,104 @@ int main(int argc, char** argv) {
         assert(normalized[3] > normalized[2]);
         assert(normalized[2] > normalized[1]);
         assert(normalized[1] > normalized[0]);
+    }
+    if (context.compute_capabilities().packed_int8_dot) {
+        constexpr std::uint32_t width = 5;
+        constexpr std::uint32_t height = 4;
+        constexpr std::uint32_t channels = 4;
+        constexpr std::uint32_t outputs = 5;
+        constexpr std::uint32_t kernel = 3;
+        std::vector<float> values(width * height * channels);
+        std::vector<float> weights(outputs * channels * kernel * kernel);
+        std::vector<float> biases(outputs);
+        for (std::size_t index = 0; index < values.size(); ++index)
+            values[index] = (static_cast<int>(index % 23u) - 11) * 0.03125f;
+        for (std::size_t index = 0; index < weights.size(); ++index)
+            weights[index] = (static_cast<int>(index % 19u) - 9) * 0.015625f;
+        for (std::size_t index = 0; index < biases.size(); ++index)
+            biases[index] = static_cast<float>(index) * 0.01f;
+        const PackedRows packed = pack_rows(
+            weights, outputs, channels * kernel * kernel);
+        auto gpu_values = context.create_device_buffer(values.size() * sizeof(float));
+        auto gpu_weights = context.create_device_buffer(weights.size() * sizeof(float));
+        auto gpu_packed = context.create_device_buffer(
+            packed.values.size() * sizeof(std::uint32_t));
+        auto gpu_scales = context.create_device_buffer(
+            packed.scales.size() * sizeof(float));
+        auto gpu_biases = context.create_device_buffer(biases.size() * sizeof(float));
+        auto fp32 = context.create_device_buffer(width * height * outputs * sizeof(float));
+        auto int8 = context.create_device_buffer(width * height * outputs * sizeof(float));
+        context.upload(gpu_values, values.data(), values.size() * sizeof(float));
+        context.upload(gpu_weights, weights.data(), weights.size() * sizeof(float));
+        context.upload(gpu_packed, packed.values.data(), packed.values.size() * sizeof(std::uint32_t));
+        context.upload(gpu_scales, packed.scales.data(), packed.scales.size() * sizeof(float));
+        context.upload(gpu_biases, biases.data(), biases.size() * sizeof(float));
+        operators.conv2d(
+            fp32, gpu_values, gpu_weights, gpu_biases,
+            width, height, channels, outputs, kernel, 1, 1, true);
+        operators.conv2d_int8(
+            int8, gpu_values, gpu_packed, gpu_scales, gpu_biases,
+            width, height, channels, outputs, kernel, 1, 1, true);
+        std::vector<float> fp32_values(width * height * outputs);
+        std::vector<float> int8_values(width * height * outputs);
+        context.download(fp32, fp32_values.data(), fp32_values.size() * sizeof(float));
+        context.download(int8, int8_values.data(), int8_values.size() * sizeof(float));
+        for (std::size_t index = 0; index < fp32_values.size(); ++index)
+            expect_near(int8_values[index], fp32_values[index], 0.006f);
+    }
+    if (context.compute_capabilities().packed_int8_dot) {
+        constexpr std::uint32_t width = 3;
+        constexpr std::uint32_t height = 2;
+        constexpr std::uint32_t inputs = 4;
+        constexpr std::uint32_t outputs = 3;
+        constexpr std::uint32_t kernel = 2;
+        std::vector<float> values(width * height * inputs);
+        std::vector<float> weights(inputs * outputs * kernel * kernel);
+        std::vector<float> rows(outputs * kernel * kernel * inputs);
+        std::vector<float> biases(outputs);
+        for (std::size_t index = 0; index < values.size(); ++index)
+            values[index] = (static_cast<int>(index % 17u) - 8) * 0.03125f;
+        for (std::size_t index = 0; index < weights.size(); ++index)
+            weights[index] = (static_cast<int>(index % 13u) - 6) * 0.02f;
+        for (std::uint32_t ky = 0; ky < kernel; ++ky)
+            for (std::uint32_t kx = 0; kx < kernel; ++kx)
+                for (std::uint32_t output = 0; output < outputs; ++output)
+                    for (std::uint32_t input_channel = 0;
+                         input_channel < inputs; ++input_channel) {
+                        const std::size_t row =
+                            (ky * kernel + kx) * outputs + output;
+                        rows[row * inputs + input_channel] = weights[
+                            ((input_channel * outputs + output) * kernel + ky) *
+                                kernel + kx];
+                    }
+        const PackedRows packed = pack_rows(
+            rows, outputs * kernel * kernel, inputs);
+        auto gpu_values = context.create_device_buffer(values.size() * sizeof(float));
+        auto gpu_weights = context.create_device_buffer(weights.size() * sizeof(float));
+        auto gpu_packed = context.create_device_buffer(packed.values.size() * sizeof(std::uint32_t));
+        auto gpu_scales = context.create_device_buffer(packed.scales.size() * sizeof(float));
+        auto gpu_biases = context.create_device_buffer(biases.size() * sizeof(float));
+        auto fp32 = context.create_device_buffer(
+            width * kernel * height * kernel * outputs * sizeof(float));
+        auto int8 = context.create_device_buffer(
+            width * kernel * height * kernel * outputs * sizeof(float));
+        context.upload(gpu_values, values.data(), values.size() * sizeof(float));
+        context.upload(gpu_weights, weights.data(), weights.size() * sizeof(float));
+        context.upload(gpu_packed, packed.values.data(), packed.values.size() * sizeof(std::uint32_t));
+        context.upload(gpu_scales, packed.scales.data(), packed.scales.size() * sizeof(float));
+        context.upload(gpu_biases, biases.data(), biases.size() * sizeof(float));
+        operators.conv_transpose_nonoverlap(
+            fp32, gpu_values, gpu_weights, gpu_biases,
+            width, height, inputs, outputs, kernel);
+        operators.conv_transpose_nonoverlap_int8(
+            int8, gpu_values, gpu_packed, gpu_scales, gpu_biases,
+            width, height, inputs, outputs, kernel);
+        std::vector<float> fp32_values(width * kernel * height * kernel * outputs);
+        std::vector<float> int8_values(fp32_values.size());
+        context.download(fp32, fp32_values.data(), fp32_values.size() * sizeof(float));
+        context.download(int8, int8_values.data(), int8_values.size() * sizeof(float));
+        for (std::size_t index = 0; index < fp32_values.size(); ++index)
+            expect_near(int8_values[index], fp32_values[index], 0.004f);
     }
     {
         constexpr std::uint32_t input_width = 11;
@@ -477,20 +609,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    operators.attention_head64(
-        gpu_attention,
-        gpu_qkv,
-        attention_tokens,
-        attention_heads,
-        nullptr,
-        true);
-    context.download(
-        gpu_attention, merged.data(), merged.size() * sizeof(float));
-    for (std::size_t index = 0; index < merged.size(); ++index) {
-        expect_near(
-            merged[index],
-            fp32_attention[index],
-            2.0e-4f);
+    if (context.compute_capabilities().fp16) {
+        operators.attention_head64(
+            gpu_attention,
+            gpu_qkv,
+            attention_tokens,
+            attention_heads,
+            nullptr,
+            inferbridge::native::Precision::fp16);
+        context.download(
+            gpu_attention, merged.data(), merged.size() * sizeof(float));
+        for (std::size_t index = 0; index < merged.size(); ++index) {
+            expect_near(
+                merged[index],
+                fp32_attention[index],
+                3.0e-4f);
+        }
     }
 
     const std::uint32_t token_width = 42;
@@ -544,12 +678,16 @@ int main(int argc, char** argv) {
         gpu_tokens,
         gpu_token_image,
         gpu_patch_weight,
+        dav2::VulkanBuffer{},
+        dav2::VulkanBuffer{},
+        dav2::VulkanBuffer{},
         gpu_patch_bias,
         gpu_class_token,
         gpu_position,
         token_width,
         token_height,
-        token_embedding);
+        token_embedding,
+        inferbridge::native::Precision::fp32);
     std::vector<float> tokens(7 * token_embedding);
     context.download(
         gpu_tokens, tokens.data(), tokens.size() * sizeof(float));

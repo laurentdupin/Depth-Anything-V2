@@ -324,21 +324,29 @@ EncoderOutput DinoEncoder::forward(
     VulkanBuffer hidden =
         context_.create_device_buffer(token_bytes * 4);
     context_.batch([&] {
+        const GpuTensor& patch_weight =
+            weights_.tensor("pretrained.patch_embed.proj.weight");
         operators_.prepare_tokens(
             current,
             image,
-            buffer(weights_, "pretrained.patch_embed.proj.weight"),
+            patch_weight.buffer,
+            patch_weight.half_buffer,
+            patch_weight.int8_buffer,
+            patch_weight.int8_scales,
             buffer(weights_, "pretrained.patch_embed.proj.bias"),
             buffer(weights_, "pretrained.cls_token"),
             buffer(weights_, "pretrained.pos_embed"),
             width,
             height,
-            embedding_);
+            embedding_,
+            precision_);
     });
-    const bool half_attention =
-        precision_ == inferbridge::native::Precision::fp16 &&
-        !force_fp32_attention_;
-    const VkDeviceSize attention_score_bytes = half_attention
+    const inferbridge::native::Precision attention_precision =
+        force_fp32_attention_ ||
+            precision_ == inferbridge::native::Precision::int8
+        ? inferbridge::native::Precision::fp32 : precision_;
+    const VkDeviceSize attention_score_bytes =
+        attention_precision == inferbridge::native::Precision::fp16
         ? std::uint64_t(heads_) * tokens *
             ((std::uint64_t(tokens) + 1) / 2) *
             sizeof(std::uint32_t)
@@ -388,7 +396,7 @@ EncoderOutput DinoEncoder::forward(
                 tokens,
                 heads_,
                 &attention_scores,
-                half_attention);
+                attention_precision);
             if (precision_ == inferbridge::native::Precision::fp32 &&
                 linear_vectorized_ &&
                 (linear_vector_tile_ == 8 ||

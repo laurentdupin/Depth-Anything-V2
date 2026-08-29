@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vulkan.h"
+#include "inferbridge/native_harness_precision.h"
 
 #include <cstdint>
 
@@ -83,18 +84,23 @@ public:
         std::uint32_t tokens,
         std::uint32_t heads,
         VulkanBuffer* score_scratch = nullptr,
-        bool half_scores = false);
+        inferbridge::native::Precision precision =
+            inferbridge::native::Precision::fp32);
 
     void prepare_tokens(
         VulkanBuffer& output,
         const VulkanBuffer& image,
         const VulkanBuffer& patch_weight,
+        const VulkanBuffer& patch_half_weight,
+        const VulkanBuffer& patch_int8_weight,
+        const VulkanBuffer& patch_int8_scales,
         const VulkanBuffer& patch_bias,
         const VulkanBuffer& class_token,
         const VulkanBuffer& position,
         std::uint32_t input_width,
         std::uint32_t input_height,
-        std::uint32_t embedding);
+        std::uint32_t embedding,
+        inferbridge::native::Precision precision);
 
     void project_tokens(
         VulkanBuffer& output,
@@ -106,6 +112,25 @@ public:
         std::uint32_t embedding,
         std::uint32_t output_channels,
         bool half_weight = false);
+    void project_tokens_fp16(
+        VulkanBuffer& output,
+        const VulkanBuffer& tokens,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t embedding,
+        std::uint32_t output_channels);
+    void project_tokens_int8(
+        VulkanBuffer& output,
+        const VulkanBuffer& tokens,
+        const VulkanBuffer& int8_weight,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t embedding,
+        std::uint32_t output_channels);
 
     void conv2d(
         VulkanBuffer& output,
@@ -124,6 +149,33 @@ public:
         bool half_weight = false,
         bool tiled = false,
         bool stride2_tiled = true);
+    void conv2d_fp16(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel,
+        std::uint32_t stride,
+        std::uint32_t padding,
+        bool has_bias);
+    void conv2d_int8(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& int8_weight,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel,
+        std::uint32_t stride,
+        std::uint32_t padding,
+        bool has_bias);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -136,6 +188,27 @@ public:
         std::uint32_t output_channels,
         std::uint32_t kernel,
         bool half_weight = false);
+    void conv_transpose_nonoverlap_fp16(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel);
+    void conv_transpose_nonoverlap_int8(
+        VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& int8_weight,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t input_width,
+        std::uint32_t input_height,
+        std::uint32_t input_channels,
+        std::uint32_t output_channels,
+        std::uint32_t kernel);
 
     void bilinear_align_true(
         VulkanBuffer& output,
@@ -175,6 +248,20 @@ public:
         std::uint32_t count);
 
 private:
+    void linear_int8_packed(
+        VulkanBuffer& output,
+        const VulkanBuffer& packed_input,
+        const VulkanBuffer& int8_weight,
+        const VulkanBuffer& input_scales,
+        const VulkanBuffer& weight_scales,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns,
+        std::uint32_t output_row_offset,
+        std::uint32_t output_row_stride,
+        bool output_transposed,
+        bool has_bias);
     VulkanContext& context_;
     VulkanPipeline linear_;
     VulkanPipeline linear16_;
@@ -202,20 +289,26 @@ private:
     VulkanPipeline bmm_;
     VulkanPipeline bmm_score_half_;
     VulkanPipeline bmm_value_half_;
+    VulkanPipeline bmm_score_fp16_;
+    VulkanPipeline bmm_value_fp16_;
     VulkanPipeline softmax_lastdim_;
     VulkanPipeline softmax_lastdim_half_;
     VulkanPipeline prepare_tokens_;
+    VulkanPipeline prepare_tokens_fp16_;
+    VulkanPipeline copy_class_token_;
     VulkanPipeline position_bicubic_;
     VulkanPipeline add_position_;
     VulkanPipeline add_;
     VulkanPipeline project_tokens_;
     VulkanPipeline project_tokens_half_;
+    VulkanPipeline project_tokens_fp16_;
     VulkanPipeline conv2d_;
     VulkanPipeline conv2d_pointwise_gemm_;
     VulkanPipeline conv2d_tiled16x8_;
     VulkanPipeline conv2d_stride2_tiled8x8_;
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
+    VulkanPipeline conv2d_fp16_;
     VulkanPipeline conv2d8_half_;
     VulkanPipeline conv2d_tiled_;
     VulkanPipeline conv2d8_tiled_;
@@ -223,6 +316,9 @@ private:
     VulkanPipeline conv2d8_tiled_half_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline conv_transpose_nonoverlap_half_;
+    VulkanPipeline conv_transpose_nonoverlap_fp16_;
+    VulkanPipeline im2col_quantize_int8_;
+    VulkanPipeline conv_transpose_int8_;
     VulkanPipeline bilinear_align_true_;
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline reduce_minmax_;

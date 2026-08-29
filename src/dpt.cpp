@@ -37,6 +37,12 @@ DptHead::DptHead(
       operators_(operators),
       zero_bias_(context.create_device_buffer(sizeof(float))),
       precision_(precision),
+      refinement_precision_(
+          precision == inferbridge::native::Precision::int8
+          ? (context.compute_capabilities().fp16
+              ? inferbridge::native::Precision::fp16
+              : inferbridge::native::Precision::fp32)
+          : precision),
       metric_max_depth_(metric_max_depth) {
     const float zero = 0.0f;
     context_.upload(zero_bias_, &zero, sizeof(zero));
@@ -159,10 +165,31 @@ void DptHead::select_convolution_block(
         }
     }
     Candidate* best =
-        precision_ == inferbridge::native::Precision::fp16
+        refinement_precision_ == inferbridge::native::Precision::fp16
         ? best_half : best_fp32;
     convolution_block8_ = best->block8;
     convolution_half_weight_ = best->half_weight;
+    if (refinement_precision_ == inferbridge::native::Precision::fp16) {
+        std::array<double, 3> native_samples{};
+        const auto run_native = [&] {
+            const auto start = std::chrono::steady_clock::now();
+            context_.batch([&] {
+                for (int repetition = 0; repetition < 3; ++repetition) {
+                    operators_.conv2d_fp16(
+                        output, input, convolution_weight.half_buffer,
+                        convolution_bias, side, side, features_, features_,
+                        3, 1, 1, true);
+                }
+            });
+            return std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - start).count();
+        };
+        run_native();
+        for (double& sample : native_samples) sample = run_native();
+        std::sort(native_samples.begin(), native_samples.end());
+        convolution_native_fp16_ =
+            native_samples[1] < best_half_time * 0.985;
+    }
     const std::uint32_t full_width = patch_width * 14;
     const std::uint32_t full_height = patch_height * 14;
     VulkanBuffer full_input = context_.create_device_buffer(
@@ -338,7 +365,10 @@ void DptHead::select_convolution_block(
         stride2_tiled_ =
             tiled_stride_samples[1] < generic_stride_samples[1] * 0.985;
     }
-    weights_.retain_dpt_precision(convolution_half_weight_);
+    weights_.retain_dpt_precision(
+        precision_, convolution_half_weight_
+            ? inferbridge::native::Precision::fp16
+            : inferbridge::native::Precision::fp32);
     convolution_block_selected_ = true;
 }
 
@@ -373,25 +403,37 @@ FeatureMap DptHead::conv(
     };
     const GpuTensor& convolution_weight =
         weights_.tensor(weight_name);
-    operators_.conv2d(
-        output.buffer,
-        input.buffer,
-        convolution_half_weight_
-            ? convolution_weight.half_buffer
-            : convolution_weight.buffer,
-        has_bias ? weight(weights_, bias_name) : zero_bias_,
-        input.width,
-        input.height,
-        input.channels,
-        output_channels,
-        kernel,
-        stride,
-        padding,
-        has_bias,
-        convolution_block8_,
-        convolution_half_weight_,
-        convolution_tiled_,
-        stride2_tiled_);
+    const VulkanBuffer& bias =
+        has_bias ? weight(weights_, bias_name) : zero_bias_;
+    const inferbridge::native::Precision operation_precision =
+        weight_name.rfind("depth_head.resize_layers.", 0) == 0
+        ? precision_ : refinement_precision_;
+    if (operation_precision == inferbridge::native::Precision::fp16) {
+        if (convolution_native_fp16_) {
+            operators_.conv2d_fp16(
+                output.buffer, input.buffer, convolution_weight.half_buffer,
+                bias, input.width, input.height, input.channels,
+                output_channels, kernel, stride, padding, has_bias);
+        } else {
+            operators_.conv2d(
+                output.buffer, input.buffer, convolution_weight.half_buffer,
+                bias, input.width, input.height, input.channels,
+                output_channels, kernel, stride, padding, has_bias,
+                convolution_block8_, true, convolution_tiled_, false);
+        }
+    } else if (operation_precision == inferbridge::native::Precision::int8) {
+        operators_.conv2d_int8(
+            output.buffer, input.buffer, convolution_weight.int8_buffer,
+            convolution_weight.int8_scales, bias,
+            input.width, input.height, input.channels, output_channels,
+            kernel, stride, padding, has_bias);
+    } else {
+        operators_.conv2d(
+            output.buffer, input.buffer, convolution_weight.buffer, bias,
+            input.width, input.height, input.channels, output_channels,
+            kernel, stride, padding, has_bias, convolution_block8_, false,
+            convolution_tiled_, stride2_tiled_);
+    }
     return output;
 }
 
@@ -509,16 +551,30 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
             };
             const std::string prefix =
                 "depth_head.projects." + std::to_string(index);
-            operators_.project_tokens(
-                projected.buffer,
-                encoded.features[index],
-                selected_weight(prefix + ".weight"),
-                weight(weights_, prefix + ".bias"),
-                encoded.patch_width,
-                encoded.patch_height,
-                embedding_,
-                project_channels_[index],
-                convolution_half_weight_);
+            const GpuTensor& projection_weight =
+                weights_.tensor(prefix + ".weight");
+            const VulkanBuffer& projection_bias =
+                weight(weights_, prefix + ".bias");
+            if (precision_ == inferbridge::native::Precision::fp16) {
+                operators_.project_tokens_fp16(
+                    projected.buffer, encoded.features[index],
+                    projection_weight.half_buffer, projection_bias,
+                    encoded.patch_width, encoded.patch_height, embedding_,
+                    project_channels_[index]);
+            } else if (precision_ == inferbridge::native::Precision::int8) {
+                operators_.project_tokens_int8(
+                    projected.buffer, encoded.features[index],
+                    projection_weight.int8_buffer,
+                    projection_weight.int8_scales, projection_bias,
+                    encoded.patch_width, encoded.patch_height, embedding_,
+                    project_channels_[index]);
+            } else {
+                operators_.project_tokens(
+                    projected.buffer, encoded.features[index],
+                    projection_weight.buffer, projection_bias,
+                    encoded.patch_width, encoded.patch_height, embedding_,
+                    project_channels_[index], false);
+            }
             if (index < 2) {
                 const std::uint32_t kernel = index == 0 ? 4 : 2;
                 FeatureMap resized{
@@ -534,17 +590,31 @@ FeatureMap DptHead::forward(EncoderOutput&& encoded) {
                 };
                 const std::string resize =
                     "depth_head.resize_layers." + std::to_string(index);
-                operators_.conv_transpose_nonoverlap(
-                    resized.buffer,
-                    projected.buffer,
-                    selected_weight(resize + ".weight"),
-                    weight(weights_, resize + ".bias"),
-                    projected.width,
-                    projected.height,
-                    projected.channels,
-                    projected.channels,
-                    kernel,
-                    convolution_half_weight_);
+                const GpuTensor& resize_weight =
+                    weights_.tensor(resize + ".weight");
+                const VulkanBuffer& resize_bias =
+                    weight(weights_, resize + ".bias");
+                if (precision_ == inferbridge::native::Precision::fp16) {
+                    operators_.conv_transpose_nonoverlap_fp16(
+                        resized.buffer, projected.buffer,
+                        resize_weight.half_buffer, resize_bias,
+                        projected.width, projected.height, projected.channels,
+                        projected.channels, kernel);
+                } else if (
+                    precision_ == inferbridge::native::Precision::int8) {
+                    operators_.conv_transpose_nonoverlap_int8(
+                        resized.buffer, projected.buffer,
+                        resize_weight.int8_buffer,
+                        resize_weight.int8_scales, resize_bias,
+                        projected.width, projected.height, projected.channels,
+                        projected.channels, kernel);
+                } else {
+                    operators_.conv_transpose_nonoverlap(
+                        resized.buffer, projected.buffer,
+                        resize_weight.buffer, resize_bias,
+                        projected.width, projected.height, projected.channels,
+                        projected.channels, kernel, false);
+                }
                 layers[index] = std::move(resized);
             } else if (index == 2) {
                 layers[index] = std::move(projected);

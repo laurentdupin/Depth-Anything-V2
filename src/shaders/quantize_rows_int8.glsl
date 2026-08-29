@@ -13,6 +13,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Scale {
 layout(push_constant) uniform Parameters {
     uint rows;
     uint columns;
+    uint input_offset;
 } parameters;
 
 void main() {
@@ -25,7 +26,9 @@ void main() {
     uint packed = 0u;
     for (uint lane = 0u; lane < 4u; ++lane) {
         const int value = int(round(clamp(
-            input_buffer.data[row * parameters.columns + column_base + lane] *
+            input_buffer.data[
+                parameters.input_offset + row * parameters.columns +
+                column_base + lane] *
                 inverse_scale,
             -127.0, 127.0)));
         packed |= (uint(value) & 0xffu) << (lane * 8u);

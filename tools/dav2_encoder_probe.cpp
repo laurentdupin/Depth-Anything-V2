@@ -85,12 +85,16 @@ int main(int argc, char** argv) {
             prepared,
             gpu_input,
             weights.tensor("pretrained.patch_embed.proj.weight").buffer,
+            weights.tensor("pretrained.patch_embed.proj.weight").half_buffer,
+            weights.tensor("pretrained.patch_embed.proj.weight").int8_buffer,
+            weights.tensor("pretrained.patch_embed.proj.weight").int8_scales,
             weights.tensor("pretrained.patch_embed.proj.bias").buffer,
             weights.tensor("pretrained.cls_token").buffer,
             weights.tensor("pretrained.pos_embed").buffer,
             width,
             height,
-            embedding);
+            embedding,
+            inferbridge::native::Precision::fp32);
         std::vector<float> prepared_host(
             std::size_t(token_count) * embedding);
         context.download(

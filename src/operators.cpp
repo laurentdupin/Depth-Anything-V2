@@ -11,12 +11,15 @@
 #include "bmm_spv.h"
 #include "bmm_score_half_spv.h"
 #include "bmm_value_half_spv.h"
+#include "bmm_score_fp16_spv.h"
+#include "bmm_value_fp16_spv.h"
 #include "conv2d_spv.h"
 #include "conv2d_pointwise_gemm_spv.h"
 #include "conv2d_tiled16x8_spv.h"
 #include "conv2d_stride2_tiled8x8_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
+#include "conv2d_fp16_spv.h"
 #include "conv2d8_half_spv.h"
 #include "conv2d_tiled_spv.h"
 #include "conv2d8_tiled_spv.h"
@@ -24,6 +27,9 @@
 #include "conv2d8_tiled_half_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
+#include "conv_transpose_nonoverlap_fp16_spv.h"
+#include "im2col_quantize_int8_spv.h"
+#include "conv_transpose_int8_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "linear_spv.h"
@@ -47,9 +53,12 @@
 #include "quantize_rows_int8_spv.h"
 #include "linear_int8_tiled_spv.h"
 #include "prepare_tokens_spv.h"
+#include "prepare_tokens_fp16_spv.h"
+#include "copy_class_token_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
 #include "project_tokens_half_spv.h"
+#include "project_tokens_fp16_spv.h"
 #include "relu_spv.h"
 #include "sigmoid_scale_spv.h"
 #include "softmax_lastdim_spv.h"
@@ -197,6 +206,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           dav2_prepare_tokens_spv_size,
           5,
           20)),
+      copy_class_token_(context.create_pipeline(
+          dav2_copy_class_token_spv,
+          dav2_copy_class_token_spv_size,
+          2,
+          4)),
       position_bicubic_(context.create_pipeline(
           dav2_position_bicubic_spv,
           dav2_position_bicubic_spv_size,
@@ -316,16 +330,51 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     if (context_.compute_capabilities().packed_int8_dot) {
         reduce_row_absmax_ = context_.create_pipeline(
             dav2_reduce_row_absmax_spv,
-            dav2_reduce_row_absmax_spv_size, 2, 8);
+            dav2_reduce_row_absmax_spv_size, 2, 12);
         quantize_rows_int8_ = context_.create_pipeline(
             dav2_quantize_rows_int8_spv,
-            dav2_quantize_rows_int8_spv_size, 3, 8);
+            dav2_quantize_rows_int8_spv_size, 3, 12);
         linear_int8_tiled_ = context_.create_pipeline(
             dav2_linear_int8_tiled_spv,
-            dav2_linear_int8_tiled_spv_size, 6, 12);
+            dav2_linear_int8_tiled_spv_size, 6, 28);
+        im2col_quantize_int8_ = context_.create_pipeline(
+            dav2_im2col_quantize_int8_spv,
+            dav2_im2col_quantize_int8_spv_size, 3, 32);
+        conv_transpose_int8_ = context_.create_pipeline(
+            dav2_conv_transpose_int8_spv,
+            dav2_conv_transpose_int8_spv_size, 6, 20);
         reduce_row_absmax_.set_debug_name("reduce_row_absmax");
         quantize_rows_int8_.set_debug_name("quantize_rows_int8");
         linear_int8_tiled_.set_debug_name("linear_int8_tiled");
+        im2col_quantize_int8_.set_debug_name("im2col_quantize_int8");
+        conv_transpose_int8_.set_debug_name("conv_transpose_int8");
+    }
+    if (context_.compute_capabilities().fp16) {
+        prepare_tokens_fp16_ = context_.create_pipeline(
+            dav2_prepare_tokens_fp16_spv,
+            dav2_prepare_tokens_fp16_spv_size, 5, 20);
+        bmm_score_fp16_ = context_.create_pipeline(
+            dav2_bmm_score_fp16_spv,
+            dav2_bmm_score_fp16_spv_size, 2, 8);
+        bmm_value_fp16_ = context_.create_pipeline(
+            dav2_bmm_value_fp16_spv,
+            dav2_bmm_value_fp16_spv_size, 3, 8);
+        project_tokens_fp16_ = context_.create_pipeline(
+            dav2_project_tokens_fp16_spv,
+            dav2_project_tokens_fp16_spv_size, 4, 16);
+        conv2d_fp16_ = context_.create_pipeline(
+            dav2_conv2d_fp16_spv,
+            dav2_conv2d_fp16_spv_size, 4, 40);
+        conv_transpose_nonoverlap_fp16_ = context_.create_pipeline(
+            dav2_conv_transpose_nonoverlap_fp16_spv,
+            dav2_conv_transpose_nonoverlap_fp16_spv_size, 4, 20);
+        prepare_tokens_fp16_.set_debug_name("prepare_tokens_fp16");
+        bmm_score_fp16_.set_debug_name("bmm_score_fp16");
+        bmm_value_fp16_.set_debug_name("bmm_value_fp16");
+        project_tokens_fp16_.set_debug_name("project_tokens_fp16");
+        conv2d_fp16_.set_debug_name("conv2d_fp16");
+        conv_transpose_nonoverlap_fp16_.set_debug_name(
+            "conv_transpose_nonoverlap_fp16");
     }
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
@@ -354,6 +403,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     softmax_lastdim_half_.set_debug_name(
         "softmax_lastdim_half");
     prepare_tokens_.set_debug_name("prepare_tokens");
+    copy_class_token_.set_debug_name("copy_class_token");
     position_bicubic_.set_debug_name("position_bicubic");
     add_position_.set_debug_name("add_position");
     add_.set_debug_name("add");
@@ -475,7 +525,8 @@ void VulkanOperators::linear_int8(
     struct QuantizeParameters {
         std::uint32_t rows;
         std::uint32_t columns;
-    } quantize_parameters{rows, input_columns};
+        std::uint32_t input_offset;
+    } quantize_parameters{rows, input_columns, 0u};
     context_.dispatch(
         reduce_row_absmax_, {&input, &input_scales},
         &quantize_parameters, sizeof(quantize_parameters), rows);
@@ -483,18 +534,9 @@ void VulkanOperators::linear_int8(
         quantize_rows_int8_, {&packed_input, &input, &input_scales},
         &quantize_parameters, sizeof(quantize_parameters),
         divide_up(rows * (input_columns / 4), 256));
-    struct Parameters {
-        std::uint32_t rows;
-        std::uint32_t input_columns;
-        std::uint32_t output_columns;
-    } parameters{rows, input_columns, output_columns};
-    context_.dispatch(
-        linear_int8_tiled_,
-        {&output, &packed_input, &int8_weight, &input_scales,
-         &weight_scales, &bias},
-        &parameters, sizeof(parameters),
-        divide_up(output_columns, 64),
-        divide_up(rows, 56));
+    linear_int8_packed(
+        output, packed_input, int8_weight, input_scales, weight_scales,
+        bias, rows, input_columns, output_columns, 0u, rows, false, true);
     if (gelu) {
         struct GeluParameters { std::uint32_t count; } gelu_parameters{
             rows * output_columns};
@@ -502,6 +544,41 @@ void VulkanOperators::linear_int8(
             gelu_, {&output, &output}, &gelu_parameters,
             sizeof(gelu_parameters), divide_up(gelu_parameters.count, 256));
     }
+}
+
+void VulkanOperators::linear_int8_packed(
+    VulkanBuffer& output,
+    const VulkanBuffer& packed_input,
+    const VulkanBuffer& int8_weight,
+    const VulkanBuffer& input_scales,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns,
+    std::uint32_t output_row_offset,
+    std::uint32_t output_row_stride,
+    bool output_transposed,
+    bool has_bias) {
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t input_columns;
+        std::uint32_t output_columns;
+        std::uint32_t output_row_offset;
+        std::uint32_t output_row_stride;
+        std::uint32_t output_transposed;
+        std::uint32_t has_bias;
+    } parameters{
+        rows, input_columns, output_columns, output_row_offset,
+        output_row_stride, output_transposed ? 1u : 0u,
+        has_bias ? 1u : 0u};
+    context_.dispatch(
+        linear_int8_tiled_,
+        {&output, &packed_input, &int8_weight, &input_scales,
+         &weight_scales, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_columns, 64),
+        divide_up(rows, 56));
 }
 
 void VulkanOperators::linear(
@@ -698,7 +775,7 @@ void VulkanOperators::attention_head64(
     std::uint32_t tokens,
     std::uint32_t heads,
     VulkanBuffer* score_scratch,
-    bool half_scores) {
+    inferbridge::native::Precision precision) {
     if (tokens == 0 || heads == 0) {
         throw std::invalid_argument("invalid attention dimensions");
     }
@@ -708,7 +785,8 @@ void VulkanOperators::attention_head64(
     require_bytes(qkv, elements * 3, "QKV");
     const std::uint64_t score_elements =
         std::uint64_t(heads) * tokens * tokens;
-    const std::uint64_t score_bytes = half_scores
+    const bool fp16 = precision == inferbridge::native::Precision::fp16;
+    const std::uint64_t score_bytes = fp16
         ? std::uint64_t(heads) * tokens *
             ((std::uint64_t(tokens) + 1) / 2) *
             sizeof(std::uint32_t)
@@ -720,18 +798,18 @@ void VulkanOperators::attention_head64(
     } else if (score_scratch->size() < score_bytes) {
         throw std::invalid_argument(
             "attention score scratch Vulkan buffer is too small");
-    } else if (!half_scores) {
+    } else if (!fp16) {
         require_bytes(
             *score_scratch, score_elements, "attention score scratch");
     }
     VulkanBuffer& scores = *score_scratch;
-    if (half_scores) {
+    if (fp16) {
         struct HalfParameters {
             std::uint32_t tokens;
             std::uint32_t heads;
         } parameters{tokens, heads};
         context_.dispatch(
-            bmm_score_half_,
+            bmm_score_fp16_,
             {&scores, &qkv},
             &parameters,
             sizeof(parameters),
@@ -749,7 +827,7 @@ void VulkanOperators::attention_head64(
             sizeof(softmax_parameters),
             softmax_parameters.rows);
         context_.dispatch(
-            bmm_value_half_,
+            bmm_value_fp16_,
             {&output, &scores, &qkv},
             &parameters,
             sizeof(parameters),
@@ -804,12 +882,16 @@ void VulkanOperators::prepare_tokens(
     VulkanBuffer& output,
     const VulkanBuffer& image,
     const VulkanBuffer& patch_weight,
+    const VulkanBuffer& patch_half_weight,
+    const VulkanBuffer& patch_int8_weight,
+    const VulkanBuffer& patch_int8_scales,
     const VulkanBuffer& patch_bias,
     const VulkanBuffer& class_token,
     const VulkanBuffer& position,
     std::uint32_t input_width,
     std::uint32_t input_height,
-    std::uint32_t embedding) {
+    std::uint32_t embedding,
+    inferbridge::native::Precision precision) {
     if (input_width == 0 || input_height == 0 ||
         input_width % 14 != 0 || input_height % 14 != 0 ||
         embedding == 0) {
@@ -821,9 +903,20 @@ void VulkanOperators::prepare_tokens(
         std::uint64_t(patch_width) * patch_height + 1;
     require_bytes(
         image, std::uint64_t(input_width) * input_height * 3, "image");
-    require_bytes(
-        patch_weight, std::uint64_t(embedding) * 3 * 14 * 14,
-        "patch weight");
+    const std::uint64_t patch_weight_elements =
+        std::uint64_t(embedding) * 3 * 14 * 14;
+    if (precision == inferbridge::native::Precision::fp16) {
+        require_half_elements(
+            patch_half_weight, patch_weight_elements, "patch weight");
+    } else if (precision == inferbridge::native::Precision::int8) {
+        const std::uint64_t words = patch_weight_elements / 4u;
+        if (patch_int8_weight.size() < words * sizeof(std::uint32_t)) {
+            throw std::invalid_argument("INT8 patch weight buffer is too small");
+        }
+        require_bytes(patch_int8_scales, embedding, "patch weight scale");
+    } else {
+        require_bytes(patch_weight, patch_weight_elements, "patch weight");
+    }
     require_bytes(patch_bias, embedding, "patch bias");
     require_bytes(class_token, embedding, "class token");
     require_bytes(
@@ -844,19 +937,53 @@ void VulkanOperators::prepare_tokens(
     };
     VulkanBuffer interpolated =
         context_.create_device_buffer(tokens * embedding * sizeof(float));
-    context_.dispatch(
-        prepare_tokens_,
-        {
-            &output,
-            &image,
-            &patch_weight,
-            &patch_bias,
-            &class_token,
-        },
-        &parameters,
-        sizeof(parameters),
-        divide_up(embedding, 8),
-        divide_up(static_cast<std::uint32_t>(tokens), 8));
+    if (precision == inferbridge::native::Precision::int8) {
+        const std::uint32_t spatial = patch_width * patch_height;
+        constexpr std::uint32_t patch_columns = 3u * 14u * 14u;
+        VulkanBuffer packed_input = context_.create_device_buffer(
+            std::uint64_t(spatial) * (patch_columns / 4u) *
+            sizeof(std::uint32_t));
+        VulkanBuffer input_scales = context_.create_device_buffer(
+            std::uint64_t(spatial) * sizeof(float));
+        struct Im2colParameters {
+            std::uint32_t input_width;
+            std::uint32_t input_height;
+            std::uint32_t input_channels;
+            std::uint32_t output_width;
+            std::uint32_t output_height;
+            std::uint32_t kernel;
+            std::uint32_t stride;
+            std::int32_t padding;
+        } im2col_parameters{
+            input_width, input_height, 3u, patch_width, patch_height,
+            14u, 14u, 0};
+        context_.dispatch(
+            im2col_quantize_int8_, {&image, &packed_input, &input_scales},
+            &im2col_parameters, sizeof(im2col_parameters), spatial);
+        struct ClassParameters { std::uint32_t embedding; } class_parameters{
+            embedding};
+        context_.dispatch(
+            copy_class_token_, {&output, &class_token},
+            &class_parameters, sizeof(class_parameters),
+            divide_up(embedding, 256));
+        linear_int8_packed(
+            output, packed_input, patch_int8_weight, input_scales,
+            patch_int8_scales, patch_bias, spatial, patch_columns,
+            embedding, 1u, static_cast<std::uint32_t>(tokens), false, true);
+    } else {
+        const VulkanBuffer& selected_weight =
+            precision == inferbridge::native::Precision::fp16
+            ? patch_half_weight : patch_weight;
+        VulkanPipeline& pipeline =
+            precision == inferbridge::native::Precision::fp16
+            ? prepare_tokens_fp16_ : prepare_tokens_;
+        context_.dispatch(
+            pipeline,
+            {&output, &image, &selected_weight, &patch_bias, &class_token},
+            &parameters, sizeof(parameters),
+            divide_up(embedding, 8),
+            divide_up(static_cast<std::uint32_t>(tokens), 8));
+    }
     struct BufferMetadata {
         std::uint32_t logical_sizes[4];
         std::uint32_t logical_strides[4];
@@ -987,6 +1114,78 @@ void VulkanOperators::project_tokens(
         divide_up(width * height, 32));
 }
 
+void VulkanOperators::project_tokens_fp16(
+    VulkanBuffer& output,
+    const VulkanBuffer& tokens,
+    const VulkanBuffer& half_weight,
+    const VulkanBuffer& bias,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t embedding,
+    std::uint32_t output_channels) {
+    if (!context_.compute_capabilities().fp16) {
+        throw std::runtime_error("native FP16 token projection is unavailable");
+    }
+    const std::uint32_t spatial = width * height;
+    require_bytes(tokens, std::uint64_t(spatial + 1u) * embedding, "tokens");
+    require_half_elements(
+        half_weight, std::uint64_t(output_channels) * embedding, "weight");
+    require_bytes(bias, output_channels, "bias");
+    require_bytes(output, std::uint64_t(spatial) * output_channels, "output");
+    struct Parameters {
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t embedding;
+        std::uint32_t output_channels;
+    } parameters{width, height, embedding, output_channels};
+    context_.dispatch(
+        project_tokens_fp16_, {&output, &tokens, &half_weight, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_channels, 32), divide_up(spatial, 32));
+}
+
+void VulkanOperators::project_tokens_int8(
+    VulkanBuffer& output,
+    const VulkanBuffer& tokens,
+    const VulkanBuffer& int8_weight,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t embedding,
+    std::uint32_t output_channels) {
+    if (!context_.compute_capabilities().packed_int8_dot) {
+        throw std::runtime_error("native INT8 token projection is unavailable");
+    }
+    const std::uint32_t spatial = width * height;
+    if (embedding % 4u != 0u) {
+        throw std::invalid_argument("INT8 token embedding must be divisible by four");
+    }
+    require_bytes(tokens, std::uint64_t(spatial + 1u) * embedding, "tokens");
+    require_bytes(weight_scales, output_channels, "weight scale");
+    require_bytes(bias, output_channels, "bias");
+    require_bytes(output, std::uint64_t(spatial) * output_channels, "output");
+    VulkanBuffer input_scales = context_.create_device_buffer(
+        std::uint64_t(spatial) * sizeof(float));
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        std::uint64_t(spatial) * (embedding / 4u) * sizeof(std::uint32_t));
+    struct QuantizeParameters {
+        std::uint32_t rows;
+        std::uint32_t columns;
+        std::uint32_t input_offset;
+    } quantize_parameters{spatial, embedding, embedding};
+    context_.dispatch(
+        reduce_row_absmax_, {&tokens, &input_scales},
+        &quantize_parameters, sizeof(quantize_parameters), spatial);
+    context_.dispatch(
+        quantize_rows_int8_, {&packed_input, &tokens, &input_scales},
+        &quantize_parameters, sizeof(quantize_parameters),
+        divide_up(spatial * (embedding / 4u), 256));
+    linear_int8_packed(
+        output, packed_input, int8_weight, input_scales, weight_scales,
+        bias, spatial, embedding, output_channels, 0u, spatial, true, true);
+}
+
 void VulkanOperators::conv2d(
     VulkanBuffer& output,
     const VulkanBuffer& input,
@@ -1091,6 +1290,130 @@ void VulkanOperators::conv2d(
                 (block8 || use_tiled16x8) ? 8 : 4));
 }
 
+void VulkanOperators::conv2d_fp16(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& half_weight,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel,
+    std::uint32_t stride,
+    std::uint32_t padding,
+    bool has_bias) {
+    if (!context_.compute_capabilities().fp16) {
+        throw std::runtime_error("native FP16 convolution is unavailable");
+    }
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0 || stride == 0 ||
+        input_width + 2u * padding < kernel ||
+        input_height + 2u * padding < kernel) {
+        throw std::invalid_argument("invalid FP16 convolution dimensions");
+    }
+    const std::uint32_t output_width =
+        (input_width + 2u * padding - kernel) / stride + 1u;
+    const std::uint32_t output_height =
+        (input_height + 2u * padding - kernel) / stride + 1u;
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * input_channels,
+        "convolution input");
+    require_half_elements(
+        half_weight,
+        std::uint64_t(output_channels) * input_channels * kernel * kernel,
+        "convolution weight");
+    require_bytes(bias, has_bias ? output_channels : 1u, "convolution bias");
+    require_bytes(
+        output, std::uint64_t(output_width) * output_height * output_channels,
+        "convolution output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+        std::uint32_t output_channels;
+        std::uint32_t kernel;
+        std::uint32_t stride;
+        std::int32_t padding;
+        std::uint32_t has_bias;
+    } parameters{
+        input_width, input_height, input_channels, output_width, output_height,
+        output_channels, kernel, stride, static_cast<std::int32_t>(padding),
+        has_bias ? 1u : 0u};
+    context_.dispatch(
+        conv2d_fp16_, {&output, &input, &half_weight, &bias},
+        &parameters, sizeof(parameters), divide_up(output_width, 8),
+        divide_up(output_height, 8), divide_up(output_channels, 4));
+}
+
+void VulkanOperators::conv2d_int8(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& int8_weight,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel,
+    std::uint32_t stride,
+    std::uint32_t padding,
+    bool has_bias) {
+    if (!context_.compute_capabilities().packed_int8_dot) {
+        throw std::runtime_error("native INT8 convolution is unavailable");
+    }
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0 || stride == 0 ||
+        input_width + 2u * padding < kernel ||
+        input_height + 2u * padding < kernel) {
+        throw std::invalid_argument("invalid INT8 convolution dimensions");
+    }
+    const std::uint32_t inner = input_channels * kernel * kernel;
+    if (inner % 4u != 0u) {
+        throw std::invalid_argument("INT8 convolution inner size is not packed");
+    }
+    const std::uint32_t output_width =
+        (input_width + 2u * padding - kernel) / stride + 1u;
+    const std::uint32_t output_height =
+        (input_height + 2u * padding - kernel) / stride + 1u;
+    const std::uint32_t rows = output_width * output_height;
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * input_channels,
+        "convolution input");
+    if (int8_weight.size() <
+        std::uint64_t(output_channels) * (inner / 4u) * sizeof(std::uint32_t)) {
+        throw std::invalid_argument("INT8 convolution weight is too small");
+    }
+    require_bytes(weight_scales, output_channels, "convolution weight scale");
+    require_bytes(bias, has_bias ? output_channels : 1u, "convolution bias");
+    require_bytes(output, std::uint64_t(rows) * output_channels, "output");
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        std::uint64_t(rows) * (inner / 4u) * sizeof(std::uint32_t));
+    VulkanBuffer input_scales = context_.create_device_buffer(
+        std::uint64_t(rows) * sizeof(float));
+    struct Im2colParameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+        std::uint32_t kernel;
+        std::uint32_t stride;
+        std::int32_t padding;
+    } parameters{
+        input_width, input_height, input_channels, output_width, output_height,
+        kernel, stride, static_cast<std::int32_t>(padding)};
+    context_.dispatch(
+        im2col_quantize_int8_, {&input, &packed_input, &input_scales},
+        &parameters, sizeof(parameters), rows);
+    linear_int8_packed(
+        output, packed_input, int8_weight, input_scales, weight_scales,
+        bias, rows, inner, output_channels, 0u, rows, true, has_bias);
+}
+
 void VulkanOperators::conv_transpose_nonoverlap(
     VulkanBuffer& output,
     const VulkanBuffer& input,
@@ -1144,6 +1467,116 @@ void VulkanOperators::conv_transpose_nonoverlap(
         divide_up(output_width, 8),
         divide_up(output_height, 8),
         output_channels);
+}
+
+void VulkanOperators::conv_transpose_nonoverlap_fp16(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& half_weight,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel) {
+    if (!context_.compute_capabilities().fp16) {
+        throw std::runtime_error(
+            "native FP16 transposed convolution is unavailable");
+    }
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0) {
+        throw std::invalid_argument("invalid FP16 transposed convolution");
+    }
+    const std::uint32_t output_width = input_width * kernel;
+    const std::uint32_t output_height = input_height * kernel;
+    require_bytes(
+        input, std::uint64_t(input_width) * input_height * input_channels,
+        "transposed convolution input");
+    require_half_elements(
+        half_weight,
+        std::uint64_t(input_channels) * output_channels * kernel * kernel,
+        "transposed convolution weight");
+    require_bytes(bias, output_channels, "transposed convolution bias");
+    require_bytes(
+        output, std::uint64_t(output_width) * output_height * output_channels,
+        "transposed convolution output");
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_channels;
+        std::uint32_t kernel;
+    } parameters{
+        input_width, input_height, input_channels, output_channels, kernel};
+    context_.dispatch(
+        conv_transpose_nonoverlap_fp16_,
+        {&output, &input, &half_weight, &bias},
+        &parameters, sizeof(parameters), divide_up(output_width, 8),
+        divide_up(output_height, 8), output_channels);
+}
+
+void VulkanOperators::conv_transpose_nonoverlap_int8(
+    VulkanBuffer& output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& int8_weight,
+    const VulkanBuffer& weight_scales,
+    const VulkanBuffer& bias,
+    std::uint32_t input_width,
+    std::uint32_t input_height,
+    std::uint32_t input_channels,
+    std::uint32_t output_channels,
+    std::uint32_t kernel) {
+    if (!context_.compute_capabilities().packed_int8_dot) {
+        throw std::runtime_error(
+            "native INT8 transposed convolution is unavailable");
+    }
+    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
+        output_channels == 0 || kernel == 0 || input_channels % 4u != 0u) {
+        throw std::invalid_argument("invalid INT8 transposed convolution");
+    }
+    const std::uint32_t input_rows = input_width * input_height;
+    const std::uint32_t packed_columns = input_channels / 4u;
+    const std::uint32_t weight_rows = kernel * kernel * output_channels;
+    if (int8_weight.size() <
+        std::uint64_t(weight_rows) * packed_columns * sizeof(std::uint32_t)) {
+        throw std::invalid_argument("INT8 transposed weight is too small");
+    }
+    require_bytes(weight_scales, weight_rows, "transposed weight scale");
+    require_bytes(bias, output_channels, "transposed bias");
+    VulkanBuffer packed_input = context_.create_device_buffer(
+        std::uint64_t(input_rows) * packed_columns * sizeof(std::uint32_t));
+    VulkanBuffer input_scales = context_.create_device_buffer(
+        std::uint64_t(input_rows) * sizeof(float));
+    struct Im2colParameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_width;
+        std::uint32_t output_height;
+        std::uint32_t kernel;
+        std::uint32_t stride;
+        std::int32_t padding;
+    } im2col_parameters{
+        input_width, input_height, input_channels, input_width, input_height,
+        1u, 1u, 0};
+    context_.dispatch(
+        im2col_quantize_int8_, {&input, &packed_input, &input_scales},
+        &im2col_parameters, sizeof(im2col_parameters), input_rows);
+    struct Parameters {
+        std::uint32_t input_width;
+        std::uint32_t input_height;
+        std::uint32_t input_channels;
+        std::uint32_t output_channels;
+        std::uint32_t kernel;
+    } parameters{
+        input_width, input_height, input_channels, output_channels, kernel};
+    context_.dispatch(
+        conv_transpose_int8_,
+        {&output, &packed_input, &int8_weight, &input_scales,
+         &weight_scales, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(input_width * kernel, 8),
+        divide_up(input_height * kernel, 8), output_channels);
 }
 
 void VulkanOperators::bilinear_align_true(

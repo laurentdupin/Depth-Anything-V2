@@ -1,3 +1,7 @@
+#if defined(NATIVE_FP16)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
@@ -10,11 +14,19 @@ layout(set = 0, binding = 1, std430) readonly buffer Input {
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
     uint data[];
 } weight_buffer;
+#if defined(NATIVE_FP16)
+float16_t read_weight(uint index) {
+    const vec2 values =
+        unpackHalf2x16(weight_buffer.data[index >> 1]);
+    return float16_t((index & 1) == 0 ? values.x : values.y);
+}
+#else
 float read_weight(uint index) {
     const vec2 values =
         unpackHalf2x16(weight_buffer.data[index >> 1]);
     return (index & 1) == 0 ? values.x : values.y;
 }
+#endif
 #else
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
     float data[];
@@ -81,8 +93,12 @@ void main() {
                         uint(input_y)) *
                         parameters.input_width +
                     uint(input_x);
-                const float input_value =
-                    input_buffer.data[input_index];
+#if defined(NATIVE_FP16)
+                const float16_t input_value =
+                    float16_t(input_buffer.data[input_index]);
+#else
+                const float input_value = input_buffer.data[input_index];
+#endif
                 for (uint output_offset = 0;
                      output_offset < OUTPUT_CHANNEL_BLOCK;
                      ++output_offset) {
@@ -97,8 +113,8 @@ void main() {
                                 kernel_y) *
                                 parameters.kernel +
                             kernel_x;
-                        sums[output_offset] += input_value *
-                            read_weight(weight_index);
+                        sums[output_offset] += float(
+                            input_value * read_weight(weight_index));
                     }
                 }
             }

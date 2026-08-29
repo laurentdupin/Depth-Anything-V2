@@ -68,9 +68,12 @@ private:
     bool convolution_block_selected_ = false;
     bool convolution_block8_ = false;
     bool convolution_half_weight_ = false;
+    bool convolution_native_fp16_ = false;
     bool convolution_tiled_ = false;
     bool stride2_tiled_ = false;
     inferbridge::native::Precision precision_ =
+        inferbridge::native::Precision::fp32;
+    inferbridge::native::Precision refinement_precision_ =
         inferbridge::native::Precision::fp32;
     float metric_max_depth_ = 0.0f;
 };

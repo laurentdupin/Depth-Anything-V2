@@ -1,3 +1,7 @@
+#if defined(NATIVE_FP16)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, std430) writeonly buffer Output {
@@ -10,11 +14,19 @@ layout(set = 0, binding = 1, std430) readonly buffer Tokens {
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
     uint data[];
 } weight_buffer;
+#if defined(NATIVE_FP16)
+float16_t read_weight(uint index) {
+    const vec2 values =
+        unpackHalf2x16(weight_buffer.data[index >> 1]);
+    return float16_t((index & 1) == 0 ? values.x : values.y);
+}
+#else
 float read_weight(uint index) {
     const vec2 values =
         unpackHalf2x16(weight_buffer.data[index >> 1]);
     return (index & 1) == 0 ? values.x : values.y;
 }
+#endif
 #else
 layout(set = 0, binding = 2, std430) readonly buffer Weight {
     float data[];
@@ -35,8 +47,15 @@ layout(push_constant) uniform Parameters {
 } parameters;
 
 #define INNER_STRIDE 17
+#if defined(NATIVE_FP16)
+shared float16_t token_tile[32 * INNER_STRIDE];
+shared float16_t weight_tile[32 * INNER_STRIDE];
+#define TILE_ZERO float16_t(0.0)
+#else
 shared float token_tile[32 * INNER_STRIDE];
 shared float weight_tile[32 * INNER_STRIDE];
+#define TILE_ZERO 0.0
+#endif
 
 void main() {
     const uint spatial = parameters.width * parameters.height;
@@ -64,9 +83,15 @@ void main() {
             token_tile[tile_row * INNER_STRIDE + index % 16] =
                 output_spatial < spatial &&
                     inner < parameters.embedding
-                ? token_buffer.data[
+                ?
+#if defined(NATIVE_FP16)
+                    float16_t(token_buffer.data[
+                    (output_spatial + 1) * parameters.embedding + inner])
+#else
+                    token_buffer.data[
                     (output_spatial + 1) * parameters.embedding + inner]
-                : 0.0;
+#endif
+                : TILE_ZERO;
         }
         for (uint index = lane; index < 32 * 16; index += 64) {
             const uint tile_column = index / 16;
@@ -78,14 +103,19 @@ void main() {
                     inner < parameters.embedding
                 ? read_weight(
                     output_channel * parameters.embedding + inner)
-                : 0.0;
+                : TILE_ZERO;
         }
         barrier();
         const uint inner_count =
             min(16, parameters.embedding - inner_base);
         for (uint inner = 0; inner < inner_count; ++inner) {
+#if defined(NATIVE_FP16)
+            float16_t token_values[4];
+            float16_t weight_values[4];
+#else
             float token_values[4];
             float weight_values[4];
+#endif
             for (uint row = 0; row < 4; ++row) {
                 token_values[row] = token_tile[
                     (gl_LocalInvocationID.y * 4 + row) *
@@ -98,8 +128,8 @@ void main() {
             }
             for (uint row = 0; row < 4; ++row) {
                 for (uint column = 0; column < 4; ++column) {
-                    sums[row][column] +=
-                        token_values[row] * weight_values[column];
+                    sums[row][column] += float(
+                        token_values[row] * weight_values[column]);
                 }
             }
         }

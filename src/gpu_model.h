@@ -34,7 +34,9 @@ public:
     const GpuTensor& tensor(std::string_view name) const;
     void retain_transformer_precision(
         inferbridge::native::Precision precision);
-    void retain_dpt_precision(bool half_weight);
+    void retain_dpt_precision(
+        inferbridge::native::Precision projection_precision,
+        inferbridge::native::Precision refinement_precision);
     std::size_t tensor_count() const { return tensors_.size(); }
 
 private:

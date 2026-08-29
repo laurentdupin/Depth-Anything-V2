@@ -29,6 +29,10 @@ layout(push_constant) uniform Parameters {
     uint rows;
     uint input_columns;
     uint output_columns;
+    uint output_row_offset;
+    uint output_row_stride;
+    uint output_transposed;
+    uint has_bias;
 } parameters;
 shared int input_tile[TILE_ROWS * K_STRIDE];
 shared int weight_tile[64 * K_STRIDE];
@@ -98,11 +102,16 @@ void main() {
         for (uint column_index = 0u; column_index < 4u; ++column_index) {
             const uint output_column = output_column_base + column_index;
             if (output_column >= parameters.output_columns) continue;
-            output_buffer.data[row * parameters.output_columns + output_column] =
+            const uint destination_row = row + parameters.output_row_offset;
+            const uint destination_index = parameters.output_transposed != 0u
+                ? output_column * parameters.output_row_stride + destination_row
+                : destination_row * parameters.output_columns + output_column;
+            output_buffer.data[destination_index] =
                 float(sums[row_index][column_index]) *
                     input_scale_buffer.data[row] *
                     weight_scale_buffer.data[output_column] +
-                bias_buffer.data[output_column];
+                (parameters.has_bias != 0u
+                    ? bias_buffer.data[output_column] : 0.0);
         }
     }
 }

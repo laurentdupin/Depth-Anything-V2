@@ -21,7 +21,8 @@ bool use_half_weight(std::string_view name) {
     if (!weight) {
         return false;
     }
-    if (name.rfind("depth_head.", 0) == 0) {
+    if (name == "pretrained.patch_embed.proj.weight" ||
+        name.rfind("depth_head.", 0) == 0) {
         return true;
     }
     if (name.rfind("pretrained.blocks.", 0) != 0) {
@@ -32,8 +33,19 @@ bool use_half_weight(std::string_view name) {
 }
 
 bool use_int8_weight(std::string_view name, const TensorView& tensor) {
-    return use_half_weight(name) && tensor.rank == 2 &&
-        tensor.dimensions[0] != 0 && tensor.dimensions[1] % 4 == 0;
+    if (!use_half_weight(name) || tensor.dimensions[0] == 0) return false;
+    if (tensor.rank == 2) return tensor.dimensions[1] % 4 == 0;
+    if (tensor.rank != 4) return false;
+    if (name == "depth_head.resize_layers.0.weight" ||
+        name == "depth_head.resize_layers.1.weight") {
+        return tensor.dimensions[0] % 4 == 0;
+    }
+    return (tensor.elements / tensor.dimensions[0]) % 4 == 0;
+}
+
+bool transposed_convolution_weight(std::string_view name) {
+    return name == "depth_head.resize_layers.0.weight" ||
+        name == "depth_head.resize_layers.1.weight";
 }
 
 std::uint16_t float_to_half(float input) {
@@ -168,27 +180,45 @@ GpuModel::GpuModel(
         if (precision == inferbridge::native::Precision::int8 &&
             use_int8_weight(name, source)) {
             const auto* floats = source.data;
-            const std::size_t output_columns =
-                static_cast<std::size_t>(source.dimensions[0]);
-            const std::size_t input_columns =
-                static_cast<std::size_t>(source.dimensions[1]);
-            std::vector<float> scales(output_columns, 1.0e-8f);
+            const bool transposed = transposed_convolution_weight(name);
+            const std::size_t input_columns = transposed
+                ? static_cast<std::size_t>(source.dimensions[0])
+                : static_cast<std::size_t>(
+                    source.elements / source.dimensions[0]);
+            const std::size_t output_rows = transposed
+                ? static_cast<std::size_t>(source.dimensions[1]) *
+                    source.dimensions[2] * source.dimensions[3]
+                : static_cast<std::size_t>(source.dimensions[0]);
+            std::vector<float> scales(output_rows, 1.0e-8f);
             std::vector<std::uint32_t> packed(
-                output_columns * (input_columns / 4), 0u);
-            for (std::size_t output = 0; output < output_columns; ++output) {
+                output_rows * (input_columns / 4), 0u);
+            const auto source_value = [&](std::size_t output,
+                                          std::size_t input) {
+                if (!transposed) {
+                    return floats[output * input_columns + input];
+                }
+                const std::size_t output_channels = source.dimensions[1];
+                const std::size_t kernel = source.dimensions[2];
+                const std::size_t kernel_index = output / output_channels;
+                const std::size_t output_channel = output % output_channels;
+                const std::size_t kernel_y = kernel_index / kernel;
+                const std::size_t kernel_x = kernel_index % kernel;
+                return floats[
+                    ((input * output_channels + output_channel) * kernel +
+                        kernel_y) * kernel + kernel_x];
+            };
+            for (std::size_t output = 0; output < output_rows; ++output) {
                 float maximum = 0.0f;
                 for (std::size_t input = 0; input < input_columns; ++input) {
-                    maximum = std::max(
-                        maximum,
-                        std::abs(floats[output * input_columns + input]));
+                    maximum = std::max(maximum, std::abs(source_value(output, input)));
                 }
                 const float scale = std::max(maximum / 127.0f, 1.0e-8f);
                 scales[output] = scale;
                 for (std::size_t input = 0; input < input_columns; input += 4) {
                     std::uint32_t word = 0u;
                     for (std::size_t lane = 0; lane < 4; ++lane) {
-                        const float normalized = floats[
-                            output * input_columns + input + lane] / scale;
+                        const float normalized =
+                            source_value(output, input + lane) / scale;
                         const int quantized = static_cast<int>(std::nearbyint(
                             std::max(-127.0f, std::min(127.0f, normalized))));
                         word |= (static_cast<std::uint32_t>(quantized) & 0xffu)
@@ -230,10 +260,11 @@ void GpuModel::retain_transformer_precision(
     inferbridge::native::Precision precision) {
     for (auto& entry : tensors_) {
         const std::string_view name = entry.first;
-        if (name.rfind("pretrained.blocks.", 0) != 0 ||
+        const bool patch = name == "pretrained.patch_embed.proj.weight";
+        if ((!patch && name.rfind("pretrained.blocks.", 0) != 0) ||
             name.size() < 7 ||
             name.substr(name.size() - 7) != ".weight" ||
-            (name.find(".attn.") == std::string_view::npos &&
+            (!patch && name.find(".attn.") == std::string_view::npos &&
              name.find(".mlp.") == std::string_view::npos)) {
             continue;
         }
@@ -251,7 +282,9 @@ void GpuModel::retain_transformer_precision(
     }
 }
 
-void GpuModel::retain_dpt_precision(bool half_weight) {
+void GpuModel::retain_dpt_precision(
+    inferbridge::native::Precision projection_precision,
+    inferbridge::native::Precision refinement_precision) {
     for (auto& entry : tensors_) {
         const std::string_view name = entry.first;
         if (name.rfind("depth_head.", 0) != 0 ||
@@ -260,8 +293,20 @@ void GpuModel::retain_dpt_precision(bool half_weight) {
             continue;
         }
         GpuTensor& tensor = entry.second;
-        context_.discard(
-            half_weight ? tensor.buffer : tensor.half_buffer);
+        const inferbridge::native::Precision precision =
+            name.rfind("depth_head.projects.", 0) == 0 ||
+                name.rfind("depth_head.resize_layers.", 0) == 0
+            ? projection_precision : refinement_precision;
+        if (precision != inferbridge::native::Precision::fp32) {
+            context_.discard(tensor.buffer);
+        }
+        if (precision != inferbridge::native::Precision::fp16) {
+            context_.discard(tensor.half_buffer);
+        }
+        if (precision != inferbridge::native::Precision::int8) {
+            context_.discard(tensor.int8_buffer);
+            context_.discard(tensor.int8_scales);
+        }
     }
 }
 
