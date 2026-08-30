@@ -53,6 +53,8 @@ typedef struct dav2_create_options {
     dav2_encoder encoder;
     int32_t vulkan_device_index;
     uint32_t flags;
+    /* Optional persistent compiler-cache root. Added as an ABI-compatible tail. */
+    const char* cache_path_utf8;
 } dav2_create_options;
 
 enum {
@@ -298,6 +300,12 @@ DAV2_API dav2_status DAV2_CALL dav2_create(
 DAV2_API dav2_status DAV2_CALL dav2_get_model_info(
     const dav2_context* context,
     dav2_model_info* info);
+
+DAV2_API dav2_status DAV2_CALL dav2_prepare(
+    dav2_context* context,
+    int32_t image_width,
+    int32_t image_height,
+    int32_t input_size);
 
 DAV2_API void DAV2_CALL dav2_destroy(dav2_context* context);
 

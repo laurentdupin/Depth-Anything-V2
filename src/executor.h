@@ -84,6 +84,11 @@ public:
 class Executor {
 public:
     virtual ~Executor() = default;
+    virtual void prepare(int image_width, int image_height, int input_size) {
+        (void)image_width;
+        (void)image_height;
+        (void)input_size;
+    }
     virtual void infer(
         const float* normalized_rgb_chw,
         int width,
@@ -112,7 +117,8 @@ std::unique_ptr<Executor> create_executor(
     const std::string& model_path,
     dav2_encoder encoder,
     int vulkan_device_index,
-    std::uint32_t flags);
+    std::uint32_t flags,
+    const std::string& cache_path);
 GpuCapabilities probe_gpu_capabilities(int vulkan_device_index);
 
 #if defined(DAV2_WITH_VULKAN)
@@ -128,7 +134,8 @@ GpuCapabilities probe_vulkan_gpu_capabilities(int vulkan_device_index);
 std::unique_ptr<Executor> create_metal_executor(
     const std::string& model_path,
     dav2_encoder encoder,
-    std::uint32_t flags);
+    std::uint32_t flags,
+    const std::string& cache_path);
 #endif
 
 }  // namespace dav2

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <new>
@@ -165,7 +166,9 @@ dav2_status DAV2_CALL dav2_create(
     if (model_path_utf8 == nullptr || model_path_utf8[0] == '\0') {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "model_path_utf8 is empty");
     }
-    if (options == nullptr || options->struct_size < sizeof(dav2_create_options)) {
+    constexpr size_t legacy_options_size =
+        offsetof(dav2_create_options, cache_path_utf8);
+    if (options == nullptr || options->struct_size < legacy_options_size) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "invalid create options");
     }
     if (options->abi_version != DAV2_ABI_VERSION) {
@@ -201,8 +204,23 @@ dav2_status DAV2_CALL dav2_create(
                 model_path_utf8,
                 options->encoder,
                 options->vulkan_device_index,
-                options->flags));
+                options->flags,
+                options->struct_size >= sizeof(dav2_create_options) &&
+                        options->cache_path_utf8 != nullptr
+                    ? options->cache_path_utf8 : ""));
         *context = result.release();
+    });
+}
+
+dav2_status DAV2_CALL dav2_prepare(
+    dav2_context* context, int32_t image_width, int32_t image_height,
+    int32_t input_size) {
+    if (context == nullptr || image_width <= 0 || image_height <= 0 ||
+        input_size <= 0) {
+        return fail(DAV2_STATUS_INVALID_ARGUMENT, "invalid prepare request");
+    }
+    return protect([&] {
+        context->executor->prepare(image_width, image_height, input_size);
     });
 }
 

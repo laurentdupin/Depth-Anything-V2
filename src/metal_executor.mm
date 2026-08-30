@@ -820,15 +820,25 @@ class MetalExecutor final : public Executor {
 public:
     MetalExecutor(
         const std::string& model_path, dav2_encoder encoder,
-        std::uint32_t flags)
+        std::uint32_t flags, const std::string& cache_path)
         : model_(model_path, encoder), encoder_(encoder),
-          metric_max_depth_(model_.derivation().metric_max_depth) {
+          metric_max_depth_(model_.derivation().metric_max_depth),
+          cache_path_(cache_path) {
         if ((flags & DAV2_CREATE_FORCE_INT8) != 0u) {
             throw std::invalid_argument(
                 "the Metal executor does not support INT8 yet");
         }
         fp16_ = (flags & DAV2_CREATE_FORCE_FP16) != 0u;
         configure_device(MTLCreateSystemDefaultDevice());
+    }
+
+    void prepare(int image_width, int image_height, int input_size) override {
+        const ImageShape network =
+            network_shape(image_width, image_height, input_size);
+        std::lock_guard<std::mutex> guard(mutex_);
+        @autoreleasepool {
+            (void)get_presentation_plan(network.width, network.height);
+        }
     }
 
     void infer(
@@ -1240,13 +1250,19 @@ private:
         if (@available(macOS 14.0, *)) {
             const ModelDerivation& derivation = model_.derivation();
             if (!derivation.present) return nil;
-            NSArray<NSString*>* cache_directories =
-                NSSearchPathForDirectoriesInDomains(
-                    NSCachesDirectory, NSUserDomainMask, YES);
-            if (cache_directories.count == 0u) return nil;
-            NSString* directory = [cache_directories.firstObject
-                stringByAppendingPathComponent:
-                    @"DepthExtractor/DAV2MetalGraphCache-v1"];
+            NSString* directory = nil;
+            if (!cache_path_.empty()) {
+                directory = [[NSString stringWithUTF8String:cache_path_.c_str()]
+                    stringByAppendingPathComponent:@"DAV2MetalGraphCache-v1"];
+            } else {
+                NSArray<NSString*>* cache_directories =
+                    NSSearchPathForDirectoriesInDomains(
+                        NSCachesDirectory, NSUserDomainMask, YES);
+                if (cache_directories.count == 0u) return nil;
+                directory = [cache_directories.firstObject
+                    stringByAppendingPathComponent:
+                        @"DepthExtractor/DAV2MetalGraphCache-v1"];
+            }
             NSError* error = nil;
             if (![[NSFileManager defaultManager]
                     createDirectoryAtPath:directory
@@ -1273,6 +1289,7 @@ private:
     ModelFile model_;
     dav2_encoder encoder_;
     float metric_max_depth_ = 0.0f;
+    std::string cache_path_;
     bool fp16_ = false;
     bool external_device_adopted_ = false;
     id<MTLDevice> device_ = nil;
@@ -1291,8 +1308,10 @@ private:
 std::unique_ptr<Executor> create_metal_executor(
     const std::string& model_path,
     dav2_encoder encoder,
-    std::uint32_t flags) {
-    return std::make_unique<MetalExecutor>(model_path, encoder, flags);
+    std::uint32_t flags,
+    const std::string& cache_path) {
+    return std::make_unique<MetalExecutor>(
+        model_path, encoder, flags, cache_path);
 }
 
 }  // namespace dav2

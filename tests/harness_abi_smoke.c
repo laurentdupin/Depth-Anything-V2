@@ -47,7 +47,8 @@ int main(void) {
         (IBRH_CAP_HOST_MEMORY | IBRH_CAP_ASYNC_SUBMIT |
          IBRH_CAP_CANCELLATION | IBRH_CAP_GPU_RESOURCES |
          IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
-         IBRH_CAP_GPU_RESIDENT_OUTPUT));
+         IBRH_CAP_GPU_RESIDENT_OUTPUT |
+         IBRH_CAP_MODEL_PREPARATION));
     CHECK(
         capabilities.input_domain_mask ==
         ((1ull << IBRH_RESOURCE_DOMAIN_HOST) |

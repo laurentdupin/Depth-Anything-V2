@@ -144,7 +144,8 @@ enum {
     IBRH_CAP_HOST_MEMORY = 1ull << 2u,
     IBRH_CAP_GPU_RESOURCES = 1ull << 3u,
     IBRH_CAP_EXTERNAL_SYNCHRONIZATION = 1ull << 4u,
-    IBRH_CAP_GPU_RESIDENT_OUTPUT = 1ull << 5u
+    IBRH_CAP_GPU_RESIDENT_OUTPUT = 1ull << 5u,
+    IBRH_CAP_MODEL_PREPARATION = 1ull << 6u
 };
 
 typedef void(IBRH_CALL* ibrh_log_fn)(
@@ -264,6 +265,15 @@ typedef struct ibrh_output_plan_request {
     ibrh_string_view parameters_json;
 } ibrh_output_plan_request;
 
+typedef struct ibrh_model_prepare_request {
+    uint32_t struct_size;
+    uint32_t api_version;
+    const ibrh_resource* inputs;
+    uint32_t input_count;
+    uint32_t reserved;
+    ibrh_string_view parameters_json;
+} ibrh_model_prepare_request;
+
 typedef struct ibrh_submit_request {
     uint32_t struct_size;
     uint32_t api_version;
@@ -334,6 +344,10 @@ typedef struct ibrh_api {
     ibrh_result(IBRH_CALL* get_last_error)(
         const void* object, char* destination, size_t destination_size,
         size_t* out_required_size);
+
+    ibrh_result(IBRH_CALL* model_prepare)(
+        ibrh_model* model, size_t request_size,
+        const ibrh_model_prepare_request* request);
 } ibrh_api;
 
 typedef ibrh_result(IBRH_CALL* ibrh_get_api_fn)(

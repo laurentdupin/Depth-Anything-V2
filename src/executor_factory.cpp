@@ -8,7 +8,8 @@ std::unique_ptr<Executor> create_executor(
     const std::string& model_path,
     dav2_encoder encoder,
     int vulkan_device_index,
-    std::uint32_t flags) {
+    std::uint32_t flags,
+    const std::string& cache_path) {
     const bool force_metal = (flags & DAV2_CREATE_FORCE_METAL) != 0u;
     const bool force_vulkan = (flags & DAV2_CREATE_FORCE_VULKAN) != 0u;
     if (force_metal && force_vulkan) {
@@ -18,7 +19,7 @@ std::unique_ptr<Executor> create_executor(
 
 #if defined(DAV2_WITH_METAL)
     if (!force_vulkan) {
-        return create_metal_executor(model_path, encoder, flags);
+        return create_metal_executor(model_path, encoder, flags, cache_path);
     }
 #else
     if (force_metal) {
@@ -27,6 +28,7 @@ std::unique_ptr<Executor> create_executor(
 #endif
 
 #if defined(DAV2_WITH_VULKAN)
+    (void)cache_path;
     return create_vulkan_executor(
         model_path, encoder, vulkan_device_index, flags);
 #else
@@ -34,6 +36,7 @@ std::unique_ptr<Executor> create_executor(
     (void)encoder;
     (void)vulkan_device_index;
     (void)flags;
+    (void)cache_path;
     throw std::runtime_error("this runtime has no available executor");
 #endif
 }

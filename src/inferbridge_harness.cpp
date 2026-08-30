@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -29,6 +30,7 @@ struct Dav2GpuAdmission;
 
 struct ibrh_runtime {
     std::string error;
+    std::string cache_path;
     int32_t vulkan_device_index = 0;
     uint64_t adapter_luid = 0u;
 };
@@ -438,7 +440,7 @@ ibrh_result IBRH_CALL query_capabilities(
     capabilities->flags |=
         IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION |
         IBRH_CAP_GPU_RESOURCES | IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
-        IBRH_CAP_GPU_RESIDENT_OUTPUT;
+        IBRH_CAP_GPU_RESIDENT_OUTPUT | IBRH_CAP_MODEL_PREPARATION;
     capabilities->input_domain_mask |=
         1ull << IBRH_RESOURCE_DOMAIN_METAL;
     capabilities->output_domain_mask |=
@@ -466,6 +468,7 @@ ibrh_result IBRH_CALL runtime_create(
         return IBRH_ERROR_STRUCT_TOO_SMALL;
     auto* runtime = new (std::nothrow) ibrh_runtime();
     if (runtime == nullptr) return IBRH_ERROR_INTERNAL;
+    runtime->cache_path = copy_string(request->cache_path);
     const std::string device = copy_string(request->requested_device_json);
     uint32_t index = 0u;
     if (json_uint(device, "index", index)) {
@@ -531,7 +534,8 @@ ibrh_result IBRH_CALL model_load(
     const dav2_create_options options{
         sizeof(options), DAV2_ABI_VERSION, encoder(path, parameters),
         runtime->vulkan_device_index,
-        create_flags};
+        create_flags, runtime->cache_path.empty()
+            ? nullptr : runtime->cache_path.c_str()};
     const dav2_status status =
         dav2_create(path.c_str(), &options, &model->context);
     if (status != DAV2_STATUS_OK) {
@@ -577,6 +581,41 @@ ibrh_result IBRH_CALL model_load(
     }
 #endif
     *output = model;
+    return IBRH_OK;
+}
+
+ibrh_result IBRH_CALL model_prepare(
+    ibrh_model* model, size_t request_size,
+    const ibrh_model_prepare_request* request) {
+    if (model == nullptr || request == nullptr)
+        return IBRH_ERROR_INVALID_ARGUMENT;
+    if (request_size < sizeof(*request) ||
+        request->struct_size < sizeof(*request))
+        return IBRH_ERROR_STRUCT_TOO_SMALL;
+    if (request->api_version != IBRH_CURRENT_API_VERSION ||
+        request->reserved != 0u || request->input_count != 1u ||
+        request->inputs == nullptr)
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "DAV2 preparation requires one input image");
+    const ibrh_resource& input = request->inputs[0];
+    if (input.struct_size < sizeof(input) || input.width == 0u ||
+        input.height == 0u ||
+        input.width > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+        input.height > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "DAV2 preparation input dimensions are invalid");
+    uint32_t size = model->input_size;
+    const std::string parameters = copy_string(request->parameters_json);
+    if (!input_size(parameters, model->input_size, size))
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "DAV2 Size must be an integer from 1 to 4096");
+    const dav2_status status = dav2_prepare(
+        model->context, static_cast<int32_t>(input.width),
+        static_cast<int32_t>(input.height), static_cast<int32_t>(size));
+    if (status != DAV2_STATUS_OK)
+        return fail(model->runtime, status_result(status),
+                    std::string("DAV2 model preparation failed: ") +
+                        dav2_last_error());
     return IBRH_OK;
 }
 
@@ -1037,24 +1076,27 @@ ibrh_result IBRH_CALL get_last_error(
 extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     uint32_t requested_api_version, size_t api_size, ibrh_api* api) {
     if (api == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
-    if (api_size < sizeof(*api)) return IBRH_ERROR_STRUCT_TOO_SMALL;
+    constexpr size_t mandatory_size = offsetof(ibrh_api, model_prepare);
+    if (api_size < mandatory_size) return IBRH_ERROR_STRUCT_TOO_SMALL;
     if ((requested_api_version >> 16u) != IBRH_API_VERSION_MAJOR)
         return IBRH_ERROR_UNSUPPORTED_API;
-    *api = {};
-    api->struct_size = sizeof(*api);
-    api->api_version = IBRH_CURRENT_API_VERSION;
-    api->query_capabilities = query_capabilities;
-    api->runtime_create = runtime_create;
-    api->runtime_destroy = runtime_destroy;
-    api->model_load = model_load;
-    api->model_unload = model_unload;
-    api->model_describe_io = model_describe_io;
-    api->model_get_port = model_get_port;
-    api->model_plan_outputs = model_plan_outputs;
-    api->submit = submit;
-    api->job_poll = job_poll;
-    api->job_cancel = job_cancel;
-    api->job_release = job_release;
-    api->get_last_error = get_last_error;
+    ibrh_api result{};
+    result.struct_size = sizeof(result);
+    result.api_version = IBRH_CURRENT_API_VERSION;
+    result.query_capabilities = query_capabilities;
+    result.runtime_create = runtime_create;
+    result.runtime_destroy = runtime_destroy;
+    result.model_load = model_load;
+    result.model_unload = model_unload;
+    result.model_describe_io = model_describe_io;
+    result.model_get_port = model_get_port;
+    result.model_plan_outputs = model_plan_outputs;
+    result.submit = submit;
+    result.job_poll = job_poll;
+    result.job_cancel = job_cancel;
+    result.job_release = job_release;
+    result.get_last_error = get_last_error;
+    result.model_prepare = model_prepare;
+    std::memcpy(api, &result, std::min(api_size, sizeof(result)));
     return IBRH_OK;
 }
