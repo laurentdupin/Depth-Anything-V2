@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(depth_anything_v2_c VERSION 0.1.0 LANGUAGES C CXX)
+# Keep the selected Vulkan SDK ahead of stale global header installations for
+# every runtime, test, and probe target that links the imported Vulkan target.
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
 include("${CMAKE_CURRENT_LIST_DIR}/../native_support/InferBridgeNativeHarnessSupport.cmake")
 link_libraries(InferBridge::NativeHarnessSupport)
 
@@ -15,6 +18,7 @@ endif()
 
 option(DAV2_BUILD_TESTS "Build the C ABI and preprocessing tests" ON)
 option(DAV2_WITH_VULKAN "Build the dependency-free Vulkan executor" ON)
+option(DAV2_WITH_METAL "Build the Apple Metal/MPSGraph executor" ${APPLE})
 option(DAV2_BUILD_TOOLS "Build native command-line tools" ON)
 
 if(DAV2_WITH_VULKAN)
@@ -127,10 +131,16 @@ endif()
 
 add_library(depth_anything_v2 SHARED
     src/dav2.cpp
+    src/executor_factory.cpp
     src/inferbridge_harness.cpp
     src/image.cpp
+    src/model.cpp
 )
 add_library(depth_anything_v2::depth_anything_v2 ALIAS depth_anything_v2)
+# Vulkan headers must come from the SDK paired with the selected loader. On
+# macOS, treating an imported SDK include as a late system directory allows a
+# stale /usr/local Vulkan installation to shadow it.
+set_property(TARGET depth_anything_v2 PROPERTY NO_SYSTEM_FROM_IMPORTED YES)
 
 target_compile_features(depth_anything_v2 PRIVATE cxx_std_17)
 target_include_directories(depth_anything_v2
@@ -145,6 +155,7 @@ target_compile_definitions(depth_anything_v2
         DAV2_BUILD_DLL
         INFERBRIDGE_HARNESS_BUILDING_LIBRARY
         $<$<BOOL:${DAV2_WITH_VULKAN}>:DAV2_WITH_VULKAN=1>
+        $<$<BOOL:${DAV2_WITH_METAL}>:DAV2_WITH_METAL=1>
 )
 set_target_properties(depth_anything_v2 PROPERTIES
     CXX_VISIBILITY_PRESET hidden
@@ -162,7 +173,6 @@ endif()
 
 if(DAV2_WITH_VULKAN)
     target_sources(depth_anything_v2 PRIVATE
-        src/model.cpp
         src/gpu_model.cpp
         src/encoder.cpp
         src/dpt.cpp
@@ -177,6 +187,21 @@ if(DAV2_WITH_VULKAN)
     if(WIN32)
         target_link_libraries(depth_anything_v2 PRIVATE d3d12 dxgi)
     endif()
+endif()
+
+if(DAV2_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "DAV2_WITH_METAL requires an Apple platform")
+    endif()
+    enable_language(OBJCXX)
+    target_sources(depth_anything_v2 PRIVATE src/metal_executor.mm)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(depth_anything_v2 PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalPerformanceShaders"
+        "-framework MetalPerformanceShadersGraph")
 endif()
 
 include(GNUInstallDirs)
@@ -257,6 +282,22 @@ if(DAV2_BUILD_TESTS)
     add_executable(dav2_preprocess_probe tools/dav2_preprocess_probe.cpp src/image.cpp)
     target_include_directories(
         dav2_preprocess_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    if(DAV2_WITH_METAL)
+        add_executable(dav2_metal_full_graph tests/metal_full_graph.cpp)
+        target_link_libraries(dav2_metal_full_graph PRIVATE depth_anything_v2)
+        add_test(NAME dav2_metal_full_graph COMMAND dav2_metal_full_graph)
+        set_tests_properties(
+            dav2_metal_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+
+    if(DAV2_WITH_METAL AND DAV2_WITH_VULKAN)
+        add_executable(dav2_backend_parity tests/backend_parity.cpp)
+        target_link_libraries(dav2_backend_parity PRIVATE depth_anything_v2)
+        add_test(NAME dav2_backend_parity COMMAND dav2_backend_parity)
+        set_tests_properties(
+            dav2_backend_parity PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 
     if(DAV2_WITH_VULKAN)
         add_executable(dav2_vulkan_smoke

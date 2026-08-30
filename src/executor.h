@@ -115,4 +115,20 @@ std::unique_ptr<Executor> create_executor(
     std::uint32_t flags);
 GpuCapabilities probe_gpu_capabilities(int vulkan_device_index);
 
+#if defined(DAV2_WITH_VULKAN)
+std::unique_ptr<Executor> create_vulkan_executor(
+    const std::string& model_path,
+    dav2_encoder encoder,
+    int vulkan_device_index,
+    std::uint32_t flags);
+GpuCapabilities probe_vulkan_gpu_capabilities(int vulkan_device_index);
+#endif
+
+#if defined(DAV2_WITH_METAL)
+std::unique_ptr<Executor> create_metal_executor(
+    const std::string& model_path,
+    dav2_encoder encoder,
+    std::uint32_t flags);
+#endif
+
 }  // namespace dav2

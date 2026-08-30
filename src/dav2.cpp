@@ -90,22 +90,6 @@ dav2_status protect(Function&& function) {
 
 }  // namespace
 
-#if !defined(DAV2_WITH_VULKAN)
-namespace dav2 {
-std::unique_ptr<Executor> create_executor(
-    const std::string&,
-    dav2_encoder,
-    int,
-    std::uint32_t) {
-    throw std::runtime_error(
-        "this DLL was built without Vulkan");
-}
-GpuCapabilities probe_gpu_capabilities(int) {
-    return {};
-}
-}  // namespace dav2
-#endif
-
 extern "C" {
 
 uint32_t DAV2_CALL dav2_abi_version(void) {
@@ -195,7 +179,9 @@ dav2_status DAV2_CALL dav2_create(
         DAV2_CREATE_FORCE_FP32_WEIGHTS |
         DAV2_CREATE_FORCE_FP32_ATTENTION |
         DAV2_CREATE_FORCE_FP16 |
-        DAV2_CREATE_FORCE_INT8;
+        DAV2_CREATE_FORCE_INT8 |
+        DAV2_CREATE_FORCE_METAL |
+        DAV2_CREATE_FORCE_VULKAN;
     if ((options->flags & ~supported_flags) != 0) {
         return fail(DAV2_STATUS_INVALID_ARGUMENT, "unsupported create flags");
     }

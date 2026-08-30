@@ -65,7 +65,10 @@ enum {
     DAV2_CREATE_FORCE_FP32_WEIGHTS = 1u << 1u,
     DAV2_CREATE_FORCE_FP32_ATTENTION = 1u << 2u,
     DAV2_CREATE_FORCE_FP16 = 1u << 3u,
-    DAV2_CREATE_FORCE_INT8 = 1u << 4u
+    DAV2_CREATE_FORCE_INT8 = 1u << 4u,
+    /* Select an executor without changing the stable create-options layout. */
+    DAV2_CREATE_FORCE_METAL = 1u << 5u,
+    DAV2_CREATE_FORCE_VULKAN = 1u << 6u
 };
 
 typedef struct dav2_model_info {

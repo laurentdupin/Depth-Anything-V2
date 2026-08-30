@@ -1,0 +1,50 @@
+#include "executor.h"
+
+#include <stdexcept>
+
+namespace dav2 {
+
+std::unique_ptr<Executor> create_executor(
+    const std::string& model_path,
+    dav2_encoder encoder,
+    int vulkan_device_index,
+    std::uint32_t flags) {
+    const bool force_metal = (flags & DAV2_CREATE_FORCE_METAL) != 0u;
+    const bool force_vulkan = (flags & DAV2_CREATE_FORCE_VULKAN) != 0u;
+    if (force_metal && force_vulkan) {
+        throw std::invalid_argument(
+            "Metal and Vulkan cannot both be forced");
+    }
+
+#if defined(DAV2_WITH_METAL)
+    if (!force_vulkan) {
+        return create_metal_executor(model_path, encoder, flags);
+    }
+#else
+    if (force_metal) {
+        throw std::runtime_error("this runtime was built without Metal");
+    }
+#endif
+
+#if defined(DAV2_WITH_VULKAN)
+    return create_vulkan_executor(
+        model_path, encoder, vulkan_device_index, flags);
+#else
+    (void)model_path;
+    (void)encoder;
+    (void)vulkan_device_index;
+    (void)flags;
+    throw std::runtime_error("this runtime has no available executor");
+#endif
+}
+
+GpuCapabilities probe_gpu_capabilities(int vulkan_device_index) {
+#if defined(DAV2_WITH_VULKAN)
+    return probe_vulkan_gpu_capabilities(vulkan_device_index);
+#else
+    (void)vulkan_device_index;
+    return {};
+#endif
+}
+
+}  // namespace dav2
