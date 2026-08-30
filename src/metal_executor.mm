@@ -139,12 +139,14 @@ class MetalGraphBuilder {
 public:
     MetalGraphBuilder(
         const ModelFile& model, dav2_encoder encoder,
-        int width, int height, int output_width, int output_height)
+        int width, int height, int output_width, int output_height,
+        bool fp16)
         : model_(model), config_(configuration(encoder)),
           width_(width), height_(height),
           patch_width_(width / 14), patch_height_(height / 14),
           tokens_(patch_width_ * patch_height_ + 1),
           output_width_(output_width), output_height_(output_height),
+          fp16_(fp16),
           graph_([MPSGraph new]) {}
 
     MPSGraph* graph() const { return graph_; }
@@ -155,8 +157,11 @@ public:
         input_ = [graph_ placeholderWithShape:shape({1, 3, height_, width_})
                                          dataType:MPSDataTypeFloat32
                                              name:@"normalized_rgb_chw"];
+        MPSGraphTensor* graph_input = fp16_
+            ? [graph_ castTensor:input_ toType:MPSDataTypeFloat16 name:nil]
+            : input_;
         MPSGraphTensor* current = conv(
-            input_, "pretrained.patch_embed.proj", 14, 0);
+            graph_input, "pretrained.patch_embed.proj", 14, 0);
         current = [graph_ reshapeTensor:current
                               withShape:shape({1, config_.embedding,
                                                patch_height_ * patch_width_})
@@ -296,6 +301,15 @@ public:
                                     layout:MPSGraphTensorNamedDataLayoutNCHW
                                       name:nil];
         }
+        cast_output_float32();
+    }
+
+    void cast_output_float32() {
+        if (fp16_ && output_.dataType != MPSDataTypeFloat32) {
+            output_ = [graph_ castTensor:output_
+                                  toType:MPSDataTypeFloat32
+                                    name:@"depth_float32"];
+        }
     }
 
 private:
@@ -305,22 +319,32 @@ private:
             const_cast<float*>(tensor.data)
             length:static_cast<NSUInteger>(tensor.elements * sizeof(float))
             freeWhenDone:NO];
-        return [graph_ constantWithData:data
-                                  shape:shape(tensor)
-                               dataType:MPSDataTypeFloat32];
+        MPSGraphTensor* value = [graph_ constantWithData:data
+                                                   shape:shape(tensor)
+                                                dataType:MPSDataTypeFloat32];
+        return fp16_
+            ? [graph_ castTensor:value toType:MPSDataTypeFloat16 name:nil]
+            : value;
     }
 
     MPSGraphTensor* owned_constant(
         const std::vector<float>& values, MPSShape* dimensions) {
         NSData* data = [NSData dataWithBytes:values.data()
                                       length:values.size() * sizeof(float)];
-        return [graph_ constantWithData:data
-                                  shape:dimensions
-                               dataType:MPSDataTypeFloat32];
+        MPSGraphTensor* value = [graph_ constantWithData:data
+                                                   shape:dimensions
+                                                dataType:MPSDataTypeFloat32];
+        return fp16_
+            ? [graph_ castTensor:value toType:MPSDataTypeFloat16 name:nil]
+            : value;
     }
 
     MPSGraphTensor* scalar(float value) {
-        return [graph_ constantWithScalar:value dataType:MPSDataTypeFloat32];
+        MPSGraphTensor* result = [graph_ constantWithScalar:value
+                                                   dataType:MPSDataTypeFloat32];
+        return fp16_
+            ? [graph_ castTensor:result toType:MPSDataTypeFloat16 name:nil]
+            : result;
     }
 
     MPSGraphTensor* add(MPSGraphTensor* left, MPSGraphTensor* right) {
@@ -558,6 +582,7 @@ private:
     int tokens_;
     int output_width_;
     int output_height_;
+    bool fp16_ = false;
     MPSGraph* graph_;
     MPSGraphTensor* input_ = nil;
     MPSGraphTensor* output_ = nil;
@@ -775,52 +800,8 @@ public:
             throw std::invalid_argument(
                 "the Metal executor does not support INT8 yet");
         }
-        if ((flags & DAV2_CREATE_FORCE_FP16) != 0u) {
-            throw std::invalid_argument(
-                "the Metal executor does not support forced FP16 yet");
-        }
-        device_ = MTLCreateSystemDefaultDevice();
-        if (device_ == nil) {
-            throw std::runtime_error("Metal is unavailable on this Mac");
-        }
-        queue_ = [device_ newCommandQueue];
-        graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
-        if (queue_ == nil || graph_device_ == nil) {
-            throw std::runtime_error("could not initialize the Metal executor");
-        }
-        NSError* error = nil;
-        NSString* source = [NSString stringWithUTF8String:kMetalTransferKernels];
-        id<MTLLibrary> library = [device_
-            newLibraryWithSource:source options:nil error:&error];
-        if (library == nil) {
-            const char* description = error.localizedDescription.UTF8String;
-            throw std::runtime_error(description == nullptr
-                ? "could not compile DAV2 Metal transfer kernels"
-                : std::string("could not compile DAV2 Metal transfer kernels: ") +
-                    description);
-        }
-        id<MTLFunction> preprocess =
-            [library newFunctionWithName:@"preprocess_texture"];
-        id<MTLFunction> copy =
-            [library newFunctionWithName:@"copy_depth_to_texture"];
-        preprocess_pipeline_ = [device_
-            newComputePipelineStateWithFunction:preprocess error:&error];
-        if (preprocess_pipeline_ == nil) {
-            const char* description = error.localizedDescription.UTF8String;
-            throw std::runtime_error(description == nullptr
-                ? "could not create DAV2 Metal preprocess pipeline"
-                : std::string("could not create DAV2 Metal preprocess pipeline: ") +
-                    description);
-        }
-        copy_pipeline_ = [device_
-            newComputePipelineStateWithFunction:copy error:&error];
-        if (copy_pipeline_ == nil) {
-            const char* description = error.localizedDescription.UTF8String;
-            throw std::runtime_error(description == nullptr
-                ? "could not create DAV2 Metal output pipeline"
-                : std::string("could not create DAV2 Metal output pipeline: ") +
-                    description);
-        }
+        fp16_ = (flags & DAV2_CREATE_FORCE_FP16) != 0u;
+        configure_device(MTLCreateSystemDefaultDevice());
     }
 
     void infer(
@@ -925,10 +906,6 @@ public:
         const MTLPixelFormat expected_input =
             request.pixel_format == DAV2_GPU_PIXEL_BGRA8
                 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
-        if (input_texture.device.registryID != device_.registryID ||
-            output_texture.device.registryID != device_.registryID)
-            throw std::invalid_argument(
-                "Metal resources belong to a different device");
         if (input_texture.textureType != MTLTextureType2D ||
             input_texture.width != request.width ||
             input_texture.height != request.height ||
@@ -956,6 +933,20 @@ public:
             throw std::overflow_error("Metal inference tensors are too large");
 
         std::lock_guard<std::mutex> guard(mutex_);
+        if (!external_device_adopted_) {
+            if (input_texture.device.registryID != device_.registryID)
+                throw std::invalid_argument(
+                    "Metal input belongs to a different physical device");
+            configure_device(input_texture.device);
+            external_device_adopted_ = true;
+        }
+        if (output_texture.device.registryID != device_.registryID)
+            throw std::invalid_argument(
+                "Metal transfer resources belong to a different physical device "
+                "(executor=" + std::to_string(device_.registryID) +
+                ", input=" + std::to_string(input_texture.device.registryID) +
+                ", output=" + std::to_string(output_texture.device.registryID) +
+                ")");
         @autoreleasepool {
             MetalPlan& plan = get_presentation_plan(
                 network.width, network.height,
@@ -1055,6 +1046,51 @@ public:
     float metric_max_depth() const override { return metric_max_depth_; }
 
 private:
+    void configure_device(id<MTLDevice> device) {
+        if (device == nil)
+            throw std::runtime_error("Metal is unavailable on this Mac");
+        device_ = device;
+        queue_ = [device_ newCommandQueue];
+        graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
+        if (queue_ == nil || graph_device_ == nil)
+            throw std::runtime_error("could not initialize the Metal executor");
+
+        NSError* error = nil;
+        NSString* source = [NSString stringWithUTF8String:kMetalTransferKernels];
+        id<MTLLibrary> library = [device_
+            newLibraryWithSource:source options:nil error:&error];
+        if (library == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not compile DAV2 Metal transfer kernels"
+                : std::string("could not compile DAV2 Metal transfer kernels: ") +
+                    description);
+        }
+        id<MTLFunction> preprocess =
+            [library newFunctionWithName:@"preprocess_texture"];
+        id<MTLFunction> copy =
+            [library newFunctionWithName:@"copy_depth_to_texture"];
+        preprocess_pipeline_ = [device_
+            newComputePipelineStateWithFunction:preprocess error:&error];
+        if (preprocess_pipeline_ == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not create DAV2 Metal preprocess pipeline"
+                : std::string("could not create DAV2 Metal preprocess pipeline: ") +
+                    description);
+        }
+        copy_pipeline_ = [device_
+            newComputePipelineStateWithFunction:copy error:&error];
+        if (copy_pipeline_ == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not create DAV2 Metal output pipeline"
+                : std::string("could not create DAV2 Metal output pipeline: ") +
+                    description);
+        }
+        plans_.clear();
+    }
+
     MetalPlan& get_plan(
         int width, int height, int output_width, int output_height) {
         const PlanKey key{
@@ -1063,8 +1099,10 @@ private:
         if (existing != plans_.end()) return existing->second;
 
         MetalGraphBuilder builder(
-            model_, encoder_, width, height, output_width, output_height);
+            model_, encoder_, width, height, output_width, output_height,
+            fp16_);
         builder.build(metric_max_depth_);
+        builder.cast_output_float32();
         MPSGraphShapedType* input_type = [[MPSGraphShapedType alloc]
             initWithShape:shape({1, 3, height, width})
             dataType:MPSDataTypeFloat32];
@@ -1102,7 +1140,7 @@ private:
         if (existing != plans_.end()) return existing->second;
 
         MetalGraphBuilder builder(
-            model_, encoder_, width, height, width, height);
+            model_, encoder_, width, height, width, height, fp16_);
         builder.build_presentation(
             metric_max_depth_, output_width, output_height);
         MPSGraphShapedType* input_type = [[MPSGraphShapedType alloc]
@@ -1138,6 +1176,8 @@ private:
     ModelFile model_;
     dav2_encoder encoder_;
     float metric_max_depth_ = 0.0f;
+    bool fp16_ = false;
+    bool external_device_adopted_ = false;
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
     id<MTLComputePipelineState> preprocess_pipeline_ = nil;

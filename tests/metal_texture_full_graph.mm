@@ -97,7 +97,7 @@ int main() {
 
         const dav2_create_options options{
             sizeof(options), DAV2_ABI_VERSION, DAV2_ENCODER_VITS, 0,
-            DAV2_CREATE_FORCE_METAL};
+            DAV2_CREATE_FORCE_METAL | DAV2_CREATE_FORCE_FP16};
         dav2_context* context = nullptr;
         dav2_status status = dav2_create(model_path, &options, &context);
         if (status != DAV2_STATUS_OK) {
