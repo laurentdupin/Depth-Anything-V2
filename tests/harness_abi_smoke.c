@@ -41,6 +41,24 @@ int main(void) {
     CHECK(
         capabilities.synchronization_mask ==
         (1ull << IBRH_SYNC_D3D12_FENCE));
+#elif defined(__APPLE__)
+    CHECK(
+        capabilities.flags ==
+        (IBRH_CAP_HOST_MEMORY | IBRH_CAP_ASYNC_SUBMIT |
+         IBRH_CAP_CANCELLATION | IBRH_CAP_GPU_RESOURCES |
+         IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
+         IBRH_CAP_GPU_RESIDENT_OUTPUT));
+    CHECK(
+        capabilities.input_domain_mask ==
+        ((1ull << IBRH_RESOURCE_DOMAIN_HOST) |
+         (1ull << IBRH_RESOURCE_DOMAIN_METAL)));
+    CHECK(
+        capabilities.output_domain_mask ==
+        ((1ull << IBRH_RESOURCE_DOMAIN_HOST) |
+         (1ull << IBRH_RESOURCE_DOMAIN_METAL)));
+    CHECK(
+        capabilities.synchronization_mask ==
+        (1ull << IBRH_SYNC_METAL_SHARED_EVENT));
 #else
     CHECK(capabilities.flags == IBRH_CAP_HOST_MEMORY);
     CHECK(
@@ -53,7 +71,7 @@ int main(void) {
 #endif
     CHECK(capabilities.maximum_inputs == 1u);
     CHECK(capabilities.maximum_outputs == 1u);
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
     CHECK(capabilities.maximum_in_flight_jobs == 3u);
 #else
     CHECK(capabilities.maximum_in_flight_jobs == 1u);

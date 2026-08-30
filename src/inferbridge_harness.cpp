@@ -20,6 +20,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32) || defined(__APPLE__)
+#define DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES 1
+#endif
+
 class Dav2GpuWorker;
 struct Dav2GpuAdmission;
 
@@ -39,7 +43,7 @@ struct ibrh_model {
 #endif
     bool metric = false;
     std::mutex submit_mutex;
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     std::shared_ptr<Dav2GpuWorker> gpu_worker;
     std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
         std::make_shared<std::atomic<uint32_t>>(0u);
@@ -50,7 +54,7 @@ struct ibrh_job {
     std::atomic<uint32_t> references{1u};
     mutable std::mutex gpu_mutex;
     dav2_gpu_job* gpu_job = nullptr;
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     std::shared_ptr<Dav2GpuAdmission> gpu_admission;
     std::weak_ptr<Dav2GpuWorker> gpu_worker;
     std::atomic<uint32_t> gpu_state{IBRH_JOB_COMPLETE};
@@ -78,7 +82,7 @@ struct ibrh_job {
     ~ibrh_job() {
         if (host_worker.joinable()) host_worker.join();
         if (gpu_job != nullptr) dav2_gpu_job_release(gpu_job);
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
         gpu_admission.reset();
 #endif
     }
@@ -264,7 +268,7 @@ void release_job(ibrh_job* job) {
 
 }  // namespace
 
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
 struct Dav2GpuAdmission {
     explicit Dav2GpuAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
         : count(std::move(value)) {}
@@ -341,6 +345,8 @@ private:
                 release_job(job);
                 continue;
             }
+            dav2_gpu_job* native_job = nullptr;
+#if defined(_WIN32)
             const dav2_d3d12_texture_binding_request request{
                 sizeof(request), DAV2_ABI_VERSION,
                 job->input_texture_handle, job->width, job->height,
@@ -350,9 +356,20 @@ private:
                 job->output_fence_handle, job->output_fence_value,
                 job->source_frame_id, job->timestamp_ns,
                 job->input_texture_identity, job->output_texture_identity};
-            dav2_gpu_job* native_job = nullptr;
             const dav2_status status = dav2_submit_d3d12_texture_binding(
                 context_, &request, &native_job);
+#elif defined(__APPLE__)
+            const dav2_metal_texture_binding_request request{
+                sizeof(request), DAV2_ABI_VERSION,
+                job->input_texture_handle, job->width, job->height,
+                job->input_pixel_format, job->input_size,
+                job->input_fence_handle, job->input_fence_value,
+                job->output_texture_handle, job->width, job->height,
+                job->output_fence_handle, job->output_fence_value,
+                job->source_frame_id, job->timestamp_ns};
+            const dav2_status status = dav2_submit_metal_texture_binding(
+                context_, &request, &native_job);
+#endif
             if (status == DAV2_STATUS_OK && native_job != nullptr) {
                 if (job->cancel_requested.load())
                     (void)dav2_gpu_job_cancel(native_job);
@@ -416,6 +433,18 @@ ibrh_result IBRH_CALL query_capabilities(
         1ull << IBRH_RESOURCE_DOMAIN_D3D12;
     capabilities->synchronization_mask =
         1ull << IBRH_SYNC_D3D12_FENCE;
+    capabilities->maximum_in_flight_jobs = 3u;
+#elif defined(__APPLE__)
+    capabilities->flags |=
+        IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION |
+        IBRH_CAP_GPU_RESOURCES | IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
+        IBRH_CAP_GPU_RESIDENT_OUTPUT;
+    capabilities->input_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->output_domain_mask |=
+        1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->synchronization_mask =
+        1ull << IBRH_SYNC_METAL_SHARED_EVENT;
     capabilities->maximum_in_flight_jobs = 3u;
 #endif
     capabilities->maximum_inputs = 1u;
@@ -538,7 +567,7 @@ ibrh_result IBRH_CALL model_load(
                 "DAV2 loaded on a GPU other than the requested device");
         }
     }
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     try {
         model->gpu_worker = std::make_shared<Dav2GpuWorker>(model->context);
     } catch (...) {
@@ -553,7 +582,7 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     if (model->gpu_worker) model->gpu_worker->stop();
     model->gpu_worker.reset();
 #endif
@@ -633,9 +662,14 @@ ibrh_result IBRH_CALL submit(
         return fail(
             model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
             "DAV2 Size must be an integer from 1 to 4096");
-    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
-        input.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
-        input.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
+    const bool d3d12_texture =
+        input.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
+        input.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED;
+    const bool metal_texture =
+        input.domain == IBRH_RESOURCE_DOMAIN_METAL &&
+        input.native_handle_type == IBRH_NATIVE_HANDLE_METAL_TEXTURE;
+    if ((d3d12_texture || metal_texture) &&
+        input.kind == IBRH_RESOURCE_KIND_IMAGE_2D) {
         if ((input.pixel_format != IBRH_PIXEL_BGRA8 &&
              input.pixel_format != IBRH_PIXEL_RGBA8) ||
             input.native_handle == 0u || input.width == 0u ||
@@ -646,34 +680,61 @@ ibrh_result IBRH_CALL submit(
                 std::numeric_limits<int32_t>::max())) {
             return fail(
                 model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                "DAV2 D3D12 texture input is invalid");
+                "DAV2 native GPU texture input is invalid");
         }
         const auto& wait = input_binding.synchronization;
         const auto& signal = output_binding.synchronization;
         const uint32_t depth_format = model->metric
             ? IBRH_PIXEL_DEPTH_METRIC_FLOAT32 : IBRH_PIXEL_DEPTH_FLOAT32;
-        if (wait.kind != IBRH_SYNC_D3D12_FENCE ||
-            wait.operation != IBRH_SYNC_WAIT ||
-            wait.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
-            !wait.native_handle ||
-            output_resource.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
-            output_resource.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
-            output_resource.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
-            output_resource.pixel_format != depth_format ||
-            output_resource.width != input.width ||
-            output_resource.height != input.height ||
-            !output_resource.native_handle ||
-            signal.kind != IBRH_SYNC_D3D12_FENCE ||
-            signal.operation != IBRH_SYNC_SIGNAL ||
-            signal.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
-            !signal.native_handle)
+        const bool common_output =
+            output_resource.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
+            output_resource.pixel_format == depth_format &&
+            output_resource.width == input.width &&
+            output_resource.height == input.height &&
+            output_resource.native_handle != 0u;
+        const bool valid_d3d12 = d3d12_texture &&
+            wait.kind == IBRH_SYNC_D3D12_FENCE &&
+            wait.operation == IBRH_SYNC_WAIT &&
+            wait.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED &&
+            wait.native_handle != 0u &&
+            output_resource.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
+            output_resource.native_handle_type ==
+                IBRH_NATIVE_HANDLE_WIN32_SHARED &&
+            signal.kind == IBRH_SYNC_D3D12_FENCE &&
+            signal.operation == IBRH_SYNC_SIGNAL &&
+            signal.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED &&
+            signal.native_handle != 0u;
+        const bool no_metal_wait = wait.kind == IBRH_SYNC_NONE &&
+            wait.native_handle == 0u;
+        const bool metal_event_wait =
+            wait.kind == IBRH_SYNC_METAL_SHARED_EVENT &&
+            wait.operation == IBRH_SYNC_WAIT &&
+            wait.native_handle_type ==
+                IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT &&
+            wait.native_handle != 0u;
+        const bool valid_metal = metal_texture &&
+            (no_metal_wait || metal_event_wait) &&
+            output_resource.domain == IBRH_RESOURCE_DOMAIN_METAL &&
+            output_resource.native_handle_type ==
+                IBRH_NATIVE_HANDLE_METAL_TEXTURE &&
+            signal.kind == IBRH_SYNC_METAL_SHARED_EVENT &&
+            signal.operation == IBRH_SYNC_SIGNAL &&
+            signal.native_handle_type ==
+                IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT &&
+            signal.native_handle != 0u && signal.value != 0u;
+        if (!common_output || (!valid_d3d12 && !valid_metal))
             return fail(
                 model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                "DAV2 D3D12 transfer bindings are invalid");
+                "DAV2 native GPU transfer bindings are invalid");
 
-#if !defined(_WIN32)
+#if !defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
         return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
 #else
+#if defined(_WIN32)
+        if (!valid_d3d12) return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+#elif defined(__APPLE__)
+        if (!valid_metal) return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
+#endif
         uint32_t admitted = model->gpu_admissions->load();
         while (admitted < 3u &&
                !model->gpu_admissions->compare_exchange_weak(
@@ -700,7 +761,8 @@ ibrh_result IBRH_CALL submit(
         job->input_texture_identity = static_cast<uintptr_t>(
             input.auxiliary_handle != 0u
                 ? input.auxiliary_handle : input.native_handle);
-        job->input_fence_handle = static_cast<uintptr_t>(wait.native_handle);
+        job->input_fence_handle = wait.kind == IBRH_SYNC_NONE
+            ? 0u : static_cast<uintptr_t>(wait.native_handle);
         job->input_fence_value = wait.value;
         job->input_pixel_format = input.pixel_format == IBRH_PIXEL_BGRA8
             ? DAV2_GPU_PIXEL_BGRA8 : DAV2_GPU_PIXEL_RGBA8;
@@ -879,7 +941,7 @@ ibrh_result IBRH_CALL job_poll(
         std::lock_guard<std::mutex> lock(job->gpu_mutex);
         gpu_job = job->gpu_job;
     }
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     if (job->gpu_admission && gpu_job == nullptr) {
         status->state = job->gpu_state.load();
     } else
@@ -919,7 +981,7 @@ ibrh_result IBRH_CALL job_poll(
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     job->cancel_requested.store(true);
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job))
@@ -932,12 +994,12 @@ ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     }
     if (gpu_job != nullptr) {
         const ibrh_result result = status_result(dav2_gpu_job_cancel(gpu_job));
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
         if (result == IBRH_OK) job->gpu_state.store(IBRH_JOB_CANCELLED);
 #endif
         return result;
     }
-#if defined(_WIN32)
+#if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     if (job->gpu_admission) {
         job->gpu_state.store(IBRH_JOB_CANCELLED);
         return IBRH_OK;
