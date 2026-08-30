@@ -95,7 +95,11 @@ enum {
     DAV2_GPU_CAP_NO_HOST_PIXEL_STAGING = 1ull << 6u,
     DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING = 1ull << 7u,
     DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_INPUT = 1ull << 8u,
-    DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT = 1ull << 9u
+    DAV2_GPU_CAP_D3D12_SHARED_TEXTURE_OUTPUT = 1ull << 9u,
+    DAV2_GPU_CAP_METAL_TEXTURE_INPUT = 1ull << 10u,
+    DAV2_GPU_CAP_METAL_SHARED_EVENT_WAIT = 1ull << 11u,
+    DAV2_GPU_CAP_METAL_TEXTURE_OUTPUT = 1ull << 12u,
+    DAV2_GPU_CAP_METAL_SHARED_EVENT_SIGNAL = 1ull << 13u
 };
 
 typedef enum dav2_gpu_pixel_format {
@@ -180,6 +184,32 @@ typedef struct dav2_d3d12_texture_binding_request {
     uint64_t input_texture_identity;
     uint64_t output_texture_identity;
 } dav2_d3d12_texture_binding_request;
+
+/*
+ * Apple in-process Metal texture binding. Every Objective-C object pointer is
+ * borrowed at submission and retained by the returned GPU job. The input wait
+ * event may be zero when the provider publishes only completed textures. The
+ * output shared event is required and is signaled after the R32Float texture
+ * contains the normalized, presentation-sized depth image.
+ */
+typedef struct dav2_metal_texture_binding_request {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t input_texture;
+    uint32_t input_width;
+    uint32_t input_height;
+    uint32_t input_pixel_format;
+    int32_t input_size;
+    uint64_t wait_shared_event;
+    uint64_t wait_value;
+    uint64_t output_texture;
+    uint32_t output_width;
+    uint32_t output_height;
+    uint64_t signal_shared_event;
+    uint64_t signal_value;
+    uint64_t source_frame_id;
+    uint64_t timestamp_ns;
+} dav2_metal_texture_binding_request;
 
 typedef struct dav2_gpu_job_status {
     uint32_t struct_size;
@@ -296,6 +326,11 @@ DAV2_API dav2_status DAV2_CALL dav2_submit_d3d12_texture(
 DAV2_API dav2_status DAV2_CALL dav2_submit_d3d12_texture_binding(
     dav2_context* context,
     const dav2_d3d12_texture_binding_request* request,
+    dav2_gpu_job** job);
+
+DAV2_API dav2_status DAV2_CALL dav2_submit_metal_texture_binding(
+    dav2_context* context,
+    const dav2_metal_texture_binding_request* request,
     dav2_gpu_job** job);
 
 DAV2_API dav2_status DAV2_CALL dav2_gpu_job_poll(

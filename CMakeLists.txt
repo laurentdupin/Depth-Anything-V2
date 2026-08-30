@@ -289,6 +289,19 @@ if(DAV2_BUILD_TESTS)
         add_test(NAME dav2_metal_full_graph COMMAND dav2_metal_full_graph)
         set_tests_properties(
             dav2_metal_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+
+        add_executable(
+            dav2_metal_texture_full_graph
+            tests/metal_texture_full_graph.mm)
+        target_link_libraries(
+            dav2_metal_texture_full_graph PRIVATE depth_anything_v2
+            "-framework Foundation"
+            "-framework Metal")
+        add_test(
+            NAME dav2_metal_texture_full_graph
+            COMMAND dav2_metal_texture_full_graph)
+        set_tests_properties(
+            dav2_metal_texture_full_graph PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(DAV2_WITH_METAL AND DAV2_WITH_VULKAN)

@@ -1,4 +1,5 @@
 #include "executor.h"
+#include "image.h"
 #include "model.h"
 
 #import <Foundation/Foundation.h>
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -248,6 +250,52 @@ public:
             throw std::runtime_error("Metal encoder did not capture four features");
         }
         output_ = build_dpt(captured, metric_max_depth);
+    }
+
+    void build_presentation(
+        float metric_max_depth, int presentation_width,
+        int presentation_height) {
+        build(metric_max_depth);
+        NSArray<NSNumber*>* axes = @[@0, @1, @2, @3];
+        MPSGraphTensor* minimum = [graph_
+            reductionMinimumWithTensor:output_ axes:axes name:nil];
+        MPSGraphTensor* span = nil;
+        if (metric_max_depth > 0.0f) {
+            span = [graph_ subtractionWithPrimaryTensor:scalar(25.0f)
+                                        secondaryTensor:minimum
+                                                   name:nil];
+        } else {
+            MPSGraphTensor* maximum = [graph_
+                reductionMaximumWithTensor:output_ axes:axes name:nil];
+            span = [graph_ subtractionWithPrimaryTensor:maximum
+                                        secondaryTensor:minimum
+                                                   name:nil];
+        }
+        span = [graph_ maximumWithPrimaryTensor:span
+                                secondaryTensor:scalar(1.0e-12f)
+                                           name:nil];
+        MPSGraphTensor* centered = [graph_
+            subtractionWithPrimaryTensor:output_
+                          secondaryTensor:minimum
+                                     name:nil];
+        output_ = [graph_ divisionWithPrimaryTensor:centered
+                                    secondaryTensor:span
+                                               name:nil];
+        output_ = [graph_ clampWithTensor:output_
+                           minValueTensor:scalar(0.0f)
+                           maxValueTensor:scalar(1.0f)
+                                     name:nil];
+        if (presentation_width != width_ ||
+            presentation_height != height_) {
+            output_ = [graph_ resizeTensor:output_
+                                      size:shape({presentation_height,
+                                                  presentation_width})
+                                      mode:MPSGraphResizeBilinear
+                              centerResult:NO
+                              alignCorners:YES
+                                    layout:MPSGraphTensorNamedDataLayoutNCHW
+                                      name:nil];
+        }
     }
 
 private:
@@ -520,11 +568,13 @@ struct PlanKey {
     int height;
     int output_width;
     int output_height;
+    bool presentation = false;
 
     bool operator==(const PlanKey& other) const {
         return width == other.width && height == other.height &&
             output_width == other.output_width &&
-            output_height == other.output_height;
+            output_height == other.output_height &&
+            presentation == other.presentation;
     }
 };
 
@@ -534,8 +584,10 @@ struct PlanKeyHash {
         result = result * 1315423911u + static_cast<std::size_t>(value.height);
         result = result * 1315423911u +
             static_cast<std::size_t>(value.output_width);
-        return result * 1315423911u +
+        result = result * 1315423911u +
             static_cast<std::size_t>(value.output_height);
+        return result * 1315423911u +
+            static_cast<std::size_t>(value.presentation);
     }
 };
 
@@ -548,6 +600,168 @@ struct MetalPlan {
     int height = 0;
     int output_width = 0;
     int output_height = 0;
+    bool presentation = false;
+};
+
+constexpr char kMetalTransferKernels[] = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct PreprocessParameters {
+    uint source_width;
+    uint source_height;
+    uint destination_width;
+    uint destination_height;
+};
+
+float cubic1(float value) {
+    constexpr float a = -0.75f;
+    return ((a + 2.0f) * value - (a + 3.0f)) *
+        value * value + 1.0f;
+}
+
+float cubic2(float value) {
+    constexpr float a = -0.75f;
+    return ((a * value - 5.0f * a) * value + 8.0f * a) *
+        value - 4.0f * a;
+}
+
+float coefficient(int tap, float fraction) {
+    if (tap == 0) return cubic2(fraction + 1.0f);
+    if (tap == 1) return cubic1(fraction);
+    if (tap == 2) return cubic1(1.0f - fraction);
+    return cubic2(2.0f - fraction);
+}
+
+kernel void preprocess_texture(
+    texture2d<float, access::read> source [[texture(0)]],
+    device float* destination [[buffer(0)]],
+    constant PreprocessParameters& parameters [[buffer(1)]],
+    uint2 position [[thread_position_in_grid]]) {
+    if (position.x >= parameters.destination_width ||
+        position.y >= parameters.destination_height) return;
+    const float source_x =
+        (float(position.x) + 0.5f) * float(parameters.source_width) /
+            float(parameters.destination_width) - 0.5f;
+    const float source_y =
+        (float(position.y) + 0.5f) * float(parameters.source_height) /
+            float(parameters.destination_height) - 0.5f;
+    const int base_x = int(floor(source_x));
+    const int base_y = int(floor(source_y));
+    const float fraction_x = source_x - float(base_x);
+    const float fraction_y = source_y - float(base_y);
+    constexpr float means[3] = {0.485f, 0.456f, 0.406f};
+    constexpr float deviations[3] = {0.229f, 0.224f, 0.225f};
+    const uint plane =
+        parameters.destination_width * parameters.destination_height;
+    const uint index =
+        position.y * parameters.destination_width + position.x;
+    for (uint channel = 0; channel < 3; ++channel) {
+        float resized = 0.0f;
+        for (int tap_y = 0; tap_y < 4; ++tap_y) {
+            const int y = clamp(
+                base_y - 1 + tap_y, 0,
+                int(parameters.source_height) - 1);
+            float row = 0.0f;
+            for (int tap_x = 0; tap_x < 4; ++tap_x) {
+                const int x = clamp(
+                    base_x - 1 + tap_x, 0,
+                    int(parameters.source_width) - 1);
+                row += source.read(uint2(x, y))[channel] *
+                    coefficient(tap_x, fraction_x);
+            }
+            resized += row * coefficient(tap_y, fraction_y);
+        }
+        destination[channel * plane + index] =
+            (resized - means[channel]) / deviations[channel];
+    }
+}
+
+kernel void copy_depth_to_texture(
+    device const float* source [[buffer(0)]],
+    texture2d<float, access::write> destination [[texture(0)]],
+    uint2 position [[thread_position_in_grid]]) {
+    if (position.x >= destination.get_width() ||
+        position.y >= destination.get_height()) return;
+    destination.write(
+        float4(source[position.y * destination.get_width() + position.x]),
+        position);
+}
+)METAL";
+
+void dispatch_2d(
+    id<MTLComputeCommandEncoder> encoder,
+    id<MTLComputePipelineState> pipeline,
+    NSUInteger width, NSUInteger height) {
+    const NSUInteger thread_width = pipeline.threadExecutionWidth;
+    const NSUInteger thread_height = std::max<NSUInteger>(
+        1u, pipeline.maxTotalThreadsPerThreadgroup / thread_width);
+    [encoder dispatchThreads:MTLSizeMake(width, height, 1u)
+        threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1u)];
+}
+
+class MetalGpuJob final : public GpuJob {
+public:
+    MetalGpuJob(
+        id<MTLTexture> input_texture,
+        id<MTLSharedEvent> input_event,
+        id<MTLTexture> output_texture,
+        id<MTLSharedEvent> output_event,
+        id<MTLBuffer> normalized_input,
+        id<MTLBuffer> presentation_output,
+        MPSGraphTensorData* input_data,
+        MPSGraphTensorData* output_data,
+        id<MTLCommandBuffer> completion,
+        std::uint64_t signal_value)
+        : input_texture_(input_texture), input_event_(input_event),
+          output_texture_(output_texture), output_event_(output_event),
+          normalized_input_(normalized_input),
+          presentation_output_(presentation_output),
+          input_data_(input_data), output_data_(output_data),
+          completion_(completion), signal_value_(signal_value) {}
+
+    ~MetalGpuJob() override {
+        if (completion_ != nil &&
+            completion_.status < MTLCommandBufferStatusCompleted)
+            [completion_ waitUntilCompleted];
+    }
+
+    dav2_gpu_job_state state() const override {
+        if (cancelled_.load(std::memory_order_acquire))
+            return DAV2_GPU_JOB_CANCELLED;
+        if (completion_ != nil &&
+            completion_.status == MTLCommandBufferStatusError) {
+            const char* description =
+                completion_.error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "Metal inference command failed"
+                : std::string("Metal inference command failed: ") + description);
+        }
+        return output_event_.signaledValue >= signal_value_
+            ? DAV2_GPU_JOB_COMPLETE : DAV2_GPU_JOB_RUNNING;
+    }
+
+    void cancel() override {
+        cancelled_.store(true, std::memory_order_release);
+    }
+
+    GpuOutput output() const override {
+        throw std::runtime_error(
+            "InferBridge-owned Metal output has no standalone output lease");
+    }
+
+private:
+    id<MTLTexture> input_texture_ = nil;
+    id<MTLSharedEvent> input_event_ = nil;
+    id<MTLTexture> output_texture_ = nil;
+    id<MTLSharedEvent> output_event_ = nil;
+    id<MTLBuffer> normalized_input_ = nil;
+    id<MTLBuffer> presentation_output_ = nil;
+    MPSGraphTensorData* input_data_ = nil;
+    MPSGraphTensorData* output_data_ = nil;
+    id<MTLCommandBuffer> completion_ = nil;
+    std::uint64_t signal_value_ = 0u;
+    std::atomic<bool> cancelled_{false};
 };
 
 class MetalExecutor final : public Executor {
@@ -573,6 +787,39 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil) {
             throw std::runtime_error("could not initialize the Metal executor");
+        }
+        NSError* error = nil;
+        NSString* source = [NSString stringWithUTF8String:kMetalTransferKernels];
+        id<MTLLibrary> library = [device_
+            newLibraryWithSource:source options:nil error:&error];
+        if (library == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not compile DAV2 Metal transfer kernels"
+                : std::string("could not compile DAV2 Metal transfer kernels: ") +
+                    description);
+        }
+        id<MTLFunction> preprocess =
+            [library newFunctionWithName:@"preprocess_texture"];
+        id<MTLFunction> copy =
+            [library newFunctionWithName:@"copy_depth_to_texture"];
+        preprocess_pipeline_ = [device_
+            newComputePipelineStateWithFunction:preprocess error:&error];
+        if (preprocess_pipeline_ == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not create DAV2 Metal preprocess pipeline"
+                : std::string("could not create DAV2 Metal preprocess pipeline: ") +
+                    description);
+        }
+        copy_pipeline_ = [device_
+            newComputePipelineStateWithFunction:copy error:&error];
+        if (copy_pipeline_ == nil) {
+            const char* description = error.localizedDescription.UTF8String;
+            throw std::runtime_error(description == nullptr
+                ? "could not create DAV2 Metal output pipeline"
+                : std::string("could not create DAV2 Metal output pipeline: ") +
+                    description);
         }
     }
 
@@ -625,7 +872,21 @@ public:
         }
     }
 
-    GpuCapabilities gpu_capabilities() const override { return {}; }
+    GpuCapabilities gpu_capabilities() const override {
+        GpuCapabilities result;
+        result.flags =
+            DAV2_GPU_CAP_METAL_TEXTURE_INPUT |
+            DAV2_GPU_CAP_METAL_SHARED_EVENT_WAIT |
+            DAV2_GPU_CAP_METAL_TEXTURE_OUTPUT |
+            DAV2_GPU_CAP_METAL_SHARED_EVENT_SIGNAL |
+            DAV2_GPU_CAP_ASYNC_SUBMIT |
+            DAV2_GPU_CAP_CANCELLATION |
+            DAV2_GPU_CAP_NO_HOST_PIXEL_STAGING |
+            DAV2_GPU_CAP_NO_HOST_DEPTH_STAGING;
+        result.adapter_luid = device_.registryID;
+        result.maximum_in_flight_jobs = 3u;
+        return result;
+    }
 
     std::unique_ptr<GpuJob> submit_gpu(
         const GpuSubmitRequest&) override {
@@ -634,9 +895,153 @@ public:
     }
 
     std::unique_ptr<GpuJob> submit_gpu_texture(
-        const GpuTextureSubmitRequest&) override {
-        throw std::runtime_error(
-            "Metal external-texture submission is not implemented yet");
+        const GpuTextureSubmitRequest& request) override {
+        if (request.width == 0u || request.height == 0u ||
+            request.width > static_cast<std::uint32_t>(
+                std::numeric_limits<int>::max()) ||
+            request.height > static_cast<std::uint32_t>(
+                std::numeric_limits<int>::max()) ||
+            request.shared_texture_handle == 0u ||
+            request.output_texture_handle == 0u ||
+            request.output_width != request.width ||
+            request.output_height != request.height ||
+            request.signal_fence_handle == 0u ||
+            request.signal_fence_value == 0u ||
+            (request.pixel_format != DAV2_GPU_PIXEL_BGRA8 &&
+             request.pixel_format != DAV2_GPU_PIXEL_RGBA8)) {
+            throw std::invalid_argument(
+                "invalid Metal GPU texture inference request");
+        }
+        id<MTLTexture> input_texture = (__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.shared_texture_handle));
+        id<MTLTexture> output_texture = (__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.output_texture_handle));
+        id<MTLSharedEvent> wait_event = request.wait_fence_handle == 0u
+            ? nil : (__bridge id<MTLSharedEvent>)(
+                reinterpret_cast<void*>(request.wait_fence_handle));
+        id<MTLSharedEvent> signal_event =
+            (__bridge id<MTLSharedEvent>)(
+                reinterpret_cast<void*>(request.signal_fence_handle));
+        const MTLPixelFormat expected_input =
+            request.pixel_format == DAV2_GPU_PIXEL_BGRA8
+                ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
+        if (input_texture.device.registryID != device_.registryID ||
+            output_texture.device.registryID != device_.registryID)
+            throw std::invalid_argument(
+                "Metal resources belong to a different device");
+        if (input_texture.textureType != MTLTextureType2D ||
+            input_texture.width != request.width ||
+            input_texture.height != request.height ||
+            input_texture.pixelFormat != expected_input)
+            throw std::invalid_argument(
+                "Metal input texture does not match the inference descriptor");
+        if (output_texture.textureType != MTLTextureType2D ||
+            output_texture.width != request.output_width ||
+            output_texture.height != request.output_height ||
+            output_texture.pixelFormat != MTLPixelFormatR32Float) {
+            throw std::invalid_argument(
+                "Metal output texture does not match the inference descriptor");
+        }
+        const ImageShape network = network_shape(
+            static_cast<int>(request.width),
+            static_cast<int>(request.height), request.input_size);
+        const std::uint64_t normalized_bytes =
+            static_cast<std::uint64_t>(network.width) * network.height *
+            3u * sizeof(float);
+        const std::uint64_t presentation_bytes =
+            static_cast<std::uint64_t>(request.width) * request.height *
+            sizeof(float);
+        if (normalized_bytes > std::numeric_limits<NSUInteger>::max() ||
+            presentation_bytes > std::numeric_limits<NSUInteger>::max())
+            throw std::overflow_error("Metal inference tensors are too large");
+
+        std::lock_guard<std::mutex> guard(mutex_);
+        @autoreleasepool {
+            MetalPlan& plan = get_presentation_plan(
+                network.width, network.height,
+                static_cast<int>(request.width),
+                static_cast<int>(request.height));
+            id<MTLBuffer> normalized = [device_
+                newBufferWithLength:static_cast<NSUInteger>(normalized_bytes)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> presentation = [device_
+                newBufferWithLength:static_cast<NSUInteger>(presentation_bytes)
+                options:MTLResourceStorageModePrivate];
+            if (normalized == nil || presentation == nil)
+                throw std::bad_alloc();
+
+            id<MTLCommandBuffer> preprocess_command = [queue_ commandBuffer];
+            if (wait_event != nil) {
+                [preprocess_command encodeWaitForEvent:wait_event
+                                                 value:request.wait_fence_value];
+            }
+            id<MTLComputeCommandEncoder> preprocess_encoder =
+                [preprocess_command computeCommandEncoder];
+            if (preprocess_encoder == nil)
+                throw std::runtime_error(
+                    "could not encode DAV2 Metal preprocessing");
+            struct PreprocessParameters {
+                std::uint32_t source_width;
+                std::uint32_t source_height;
+                std::uint32_t destination_width;
+                std::uint32_t destination_height;
+            } parameters{
+                request.width, request.height,
+                static_cast<std::uint32_t>(network.width),
+                static_cast<std::uint32_t>(network.height)};
+            [preprocess_encoder setComputePipelineState:preprocess_pipeline_];
+            [preprocess_encoder setTexture:input_texture atIndex:0u];
+            [preprocess_encoder setBuffer:normalized offset:0u atIndex:0u];
+            [preprocess_encoder setBytes:&parameters
+                                  length:sizeof(parameters)
+                                 atIndex:1u];
+            dispatch_2d(
+                preprocess_encoder, preprocess_pipeline_,
+                network.width, network.height);
+            [preprocess_encoder endEncoding];
+            [preprocess_command commit];
+
+            MPSGraphTensorData* input_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:normalized
+                shape:shape({1, 3, network.height, network.width})
+                dataType:MPSDataTypeFloat32];
+            MPSGraphTensorData* output_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:presentation
+                shape:shape({1, 1, request.height, request.width})
+                dataType:MPSDataTypeFloat32];
+            MPSGraphExecutableExecutionDescriptor* execution =
+                [MPSGraphExecutableExecutionDescriptor new];
+            execution.waitUntilCompleted = NO;
+            NSArray<MPSGraphTensorData*>* results = [plan.executable
+                runAsyncWithMTLCommandQueue:queue_
+                inputsArray:@[input_data]
+                resultsArray:@[output_data]
+                executionDescriptor:execution];
+            if (results.count != 1u)
+                throw std::runtime_error(
+                    "Metal graph did not bind its presentation output");
+
+            id<MTLCommandBuffer> completion = [queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> copy_encoder =
+                [completion computeCommandEncoder];
+            if (copy_encoder == nil)
+                throw std::runtime_error(
+                    "could not encode DAV2 Metal output copy");
+            [copy_encoder setComputePipelineState:copy_pipeline_];
+            [copy_encoder setBuffer:presentation offset:0u atIndex:0u];
+            [copy_encoder setTexture:output_texture atIndex:0u];
+            dispatch_2d(
+                copy_encoder, copy_pipeline_,
+                request.width, request.height);
+            [copy_encoder endEncoding];
+            [completion encodeSignalEvent:signal_event
+                                    value:request.signal_fence_value];
+            [completion commit];
+            return std::make_unique<MetalGpuJob>(
+                input_texture, wait_event, output_texture, signal_event,
+                normalized, presentation, input_data, output_data,
+                completion, request.signal_fence_value);
+        }
     }
 
     void transfer_counters(
@@ -652,7 +1057,8 @@ public:
 private:
     MetalPlan& get_plan(
         int width, int height, int output_width, int output_height) {
-        const PlanKey key{width, height, output_width, output_height};
+        const PlanKey key{
+            width, height, output_width, output_height, false};
         auto existing = plans_.find(key);
         if (existing != plans_.end()) return existing->second;
 
@@ -688,11 +1094,54 @@ private:
         return plans_.emplace(key, std::move(plan)).first->second;
     }
 
+    MetalPlan& get_presentation_plan(
+        int width, int height, int output_width, int output_height) {
+        const PlanKey key{
+            width, height, output_width, output_height, true};
+        auto existing = plans_.find(key);
+        if (existing != plans_.end()) return existing->second;
+
+        MetalGraphBuilder builder(
+            model_, encoder_, width, height, width, height);
+        builder.build_presentation(
+            metric_max_depth_, output_width, output_height);
+        MPSGraphShapedType* input_type = [[MPSGraphShapedType alloc]
+            initWithShape:shape({1, 3, height, width})
+            dataType:MPSDataTypeFloat32];
+        MPSGraphCompilationDescriptor* compilation =
+            [MPSGraphCompilationDescriptor new];
+        compilation.optimizationLevel = MPSGraphOptimizationLevel1;
+        compilation.waitForCompilationCompletion = YES;
+        MPSGraphExecutable* executable = [builder.graph()
+            compileWithDevice:graph_device_
+            feeds:@{builder.input(): input_type}
+            targetTensors:@[builder.output()]
+            targetOperations:nil
+            compilationDescriptor:compilation];
+        if (executable == nil)
+            throw std::runtime_error(
+                "failed to compile the Metal presentation graph");
+        executable.options = MPSGraphOptionsNone;
+        MetalPlan plan;
+        plan.graph = builder.graph();
+        plan.input = builder.input();
+        plan.output = builder.output();
+        plan.executable = executable;
+        plan.width = width;
+        plan.height = height;
+        plan.output_width = output_width;
+        plan.output_height = output_height;
+        plan.presentation = true;
+        return plans_.emplace(key, std::move(plan)).first->second;
+    }
+
     ModelFile model_;
     dav2_encoder encoder_;
     float metric_max_depth_ = 0.0f;
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
+    id<MTLComputePipelineState> preprocess_pipeline_ = nil;
+    id<MTLComputePipelineState> copy_pipeline_ = nil;
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<PlanKey, MetalPlan, PlanKeyHash> plans_;
     std::mutex mutex_;
