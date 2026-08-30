@@ -46,6 +46,16 @@ NSString* name(const std::string& value) {
     return [NSString stringWithUTF8String:value.c_str()];
 }
 
+std::string hexadecimal(const std::array<std::uint8_t, 32>& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result(bytes.size() * 2u, '0');
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        result[index * 2u] = digits[bytes[index] >> 4u];
+        result[index * 2u + 1u] = digits[bytes[index] & 0x0fu];
+    }
+    return result;
+}
+
 float cubic_convolution1(float x) {
     constexpr float a = -0.75f;
     return ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
@@ -257,9 +267,7 @@ public:
         output_ = build_dpt(captured, metric_max_depth);
     }
 
-    void build_presentation(
-        float metric_max_depth, int presentation_width,
-        int presentation_height) {
+    void build_presentation(float metric_max_depth) {
         build(metric_max_depth);
         NSArray<NSNumber*>* axes = @[@0, @1, @2, @3];
         MPSGraphTensor* minimum = [graph_
@@ -290,17 +298,10 @@ public:
                            minValueTensor:scalar(0.0f)
                            maxValueTensor:scalar(1.0f)
                                      name:nil];
-        if (presentation_width != width_ ||
-            presentation_height != height_) {
-            output_ = [graph_ resizeTensor:output_
-                                      size:shape({presentation_height,
-                                                  presentation_width})
-                                      mode:MPSGraphResizeBilinear
-                              centerResult:NO
-                              alignCorners:YES
-                                    layout:MPSGraphTensorNamedDataLayoutNCHW
-                                      name:nil];
-        }
+        // Match the Vulkan path: normalize at network resolution, then let a
+        // small backend kernel perform the full-resolution aligned resize.
+        // Keeping presentation dimensions out of MPSGraph avoids recompiling
+        // the model for every source size and cuts first-use compilation time.
         cast_output_float32();
     }
 
@@ -702,15 +703,41 @@ kernel void preprocess_texture(
     }
 }
 
-kernel void copy_depth_to_texture(
+struct PresentationParameters {
+    uint source_width;
+    uint source_height;
+    uint destination_width;
+    uint destination_height;
+};
+
+kernel void resize_depth_to_texture(
     device const float* source [[buffer(0)]],
     texture2d<float, access::write> destination [[texture(0)]],
+    constant PresentationParameters& parameters [[buffer(1)]],
     uint2 position [[thread_position_in_grid]]) {
-    if (position.x >= destination.get_width() ||
-        position.y >= destination.get_height()) return;
-    destination.write(
-        float4(source[position.y * destination.get_width() + position.x]),
-        position);
+    if (position.x >= parameters.destination_width ||
+        position.y >= parameters.destination_height) return;
+    const float source_x = parameters.destination_width > 1
+        ? float(position.x) * float(parameters.source_width - 1) /
+            float(parameters.destination_width - 1)
+        : 0.0f;
+    const float source_y = parameters.destination_height > 1
+        ? float(position.y) * float(parameters.source_height - 1) /
+            float(parameters.destination_height - 1)
+        : 0.0f;
+    const uint x0 = uint(floor(source_x));
+    const uint y0 = uint(floor(source_y));
+    const uint x1 = min(x0 + 1, parameters.source_width - 1);
+    const uint y1 = min(y0 + 1, parameters.source_height - 1);
+    const float x_fraction = source_x - float(x0);
+    const float y_fraction = source_y - float(y0);
+    const float top = mix(
+        source[y0 * parameters.source_width + x0],
+        source[y0 * parameters.source_width + x1], x_fraction);
+    const float bottom = mix(
+        source[y1 * parameters.source_width + x0],
+        source[y1 * parameters.source_width + x1], x_fraction);
+    destination.write(float4(mix(top, bottom, y_fraction)), position);
 }
 )METAL";
 
@@ -926,7 +953,7 @@ public:
             static_cast<std::uint64_t>(network.width) * network.height *
             3u * sizeof(float);
         const std::uint64_t presentation_bytes =
-            static_cast<std::uint64_t>(request.width) * request.height *
+            static_cast<std::uint64_t>(network.width) * network.height *
             sizeof(float);
         if (normalized_bytes > std::numeric_limits<NSUInteger>::max() ||
             presentation_bytes > std::numeric_limits<NSUInteger>::max())
@@ -949,9 +976,7 @@ public:
                 ")");
         @autoreleasepool {
             MetalPlan& plan = get_presentation_plan(
-                network.width, network.height,
-                static_cast<int>(request.width),
-                static_cast<int>(request.height));
+                network.width, network.height);
             id<MTLBuffer> normalized = [device_
                 newBufferWithLength:static_cast<NSUInteger>(normalized_bytes)
                 options:MTLResourceStorageModePrivate];
@@ -998,7 +1023,7 @@ public:
                 dataType:MPSDataTypeFloat32];
             MPSGraphTensorData* output_data = [[MPSGraphTensorData alloc]
                 initWithMTLBuffer:presentation
-                shape:shape({1, 1, request.height, request.width})
+                shape:shape({1, 1, network.height, network.width})
                 dataType:MPSDataTypeFloat32];
             MPSGraphExecutableExecutionDescriptor* execution =
                 [MPSGraphExecutableExecutionDescriptor new];
@@ -1021,6 +1046,18 @@ public:
             [copy_encoder setComputePipelineState:copy_pipeline_];
             [copy_encoder setBuffer:presentation offset:0u atIndex:0u];
             [copy_encoder setTexture:output_texture atIndex:0u];
+            struct PresentationParameters {
+                std::uint32_t source_width;
+                std::uint32_t source_height;
+                std::uint32_t destination_width;
+                std::uint32_t destination_height;
+            } presentation_parameters{
+                static_cast<std::uint32_t>(network.width),
+                static_cast<std::uint32_t>(network.height),
+                request.width, request.height};
+            [copy_encoder setBytes:&presentation_parameters
+                            length:sizeof(presentation_parameters)
+                           atIndex:1u];
             dispatch_2d(
                 copy_encoder, copy_pipeline_,
                 request.width, request.height);
@@ -1069,7 +1106,7 @@ private:
         id<MTLFunction> preprocess =
             [library newFunctionWithName:@"preprocess_texture"];
         id<MTLFunction> copy =
-            [library newFunctionWithName:@"copy_depth_to_texture"];
+            [library newFunctionWithName:@"resize_depth_to_texture"];
         preprocess_pipeline_ = [device_
             newComputePipelineStateWithFunction:preprocess error:&error];
         if (preprocess_pipeline_ == nil) {
@@ -1132,17 +1169,14 @@ private:
         return plans_.emplace(key, std::move(plan)).first->second;
     }
 
-    MetalPlan& get_presentation_plan(
-        int width, int height, int output_width, int output_height) {
-        const PlanKey key{
-            width, height, output_width, output_height, true};
+    MetalPlan& get_presentation_plan(int width, int height) {
+        const PlanKey key{width, height, width, height, true};
         auto existing = plans_.find(key);
         if (existing != plans_.end()) return existing->second;
 
         MetalGraphBuilder builder(
             model_, encoder_, width, height, width, height, fp16_);
-        builder.build_presentation(
-            metric_max_depth_, output_width, output_height);
+        builder.build_presentation(metric_max_depth_);
         MPSGraphShapedType* input_type = [[MPSGraphShapedType alloc]
             initWithShape:shape({1, 3, height, width})
             dataType:MPSDataTypeFloat32];
@@ -1150,12 +1184,41 @@ private:
             [MPSGraphCompilationDescriptor new];
         compilation.optimizationLevel = MPSGraphOptimizationLevel1;
         compilation.waitForCompilationCompletion = YES;
-        MPSGraphExecutable* executable = [builder.graph()
-            compileWithDevice:graph_device_
-            feeds:@{builder.input(): input_type}
-            targetTensors:@[builder.output()]
-            targetOperations:nil
-            compilationDescriptor:compilation];
+        NSURL* cache_url = presentation_cache_url(width, height);
+        MPSGraphExecutable* executable = nil;
+        if (@available(macOS 14.0, *)) {
+            if (cache_url != nil && [[NSFileManager defaultManager]
+                    fileExistsAtPath:cache_url.path]) {
+                @try {
+                    executable = [[MPSGraphExecutable alloc]
+                        initWithMPSGraphPackageAtURL:cache_url
+                        compilationDescriptor:compilation];
+                } @catch (NSException*) {
+                    [[NSFileManager defaultManager]
+                        removeItemAtURL:cache_url error:nil];
+                    executable = nil;
+                }
+            }
+        }
+        if (executable == nil) {
+            executable = [builder.graph()
+                compileWithDevice:graph_device_
+                feeds:@{builder.input(): input_type}
+                targetTensors:@[builder.output()]
+                targetOperations:nil
+                compilationDescriptor:compilation];
+            if (@available(macOS 14.0, *)) {
+                if (executable != nil && cache_url != nil) {
+                    @try {
+                        [executable serializeToMPSGraphPackageAtURL:cache_url
+                                                         descriptor:nil];
+                    } @catch (NSException*) {
+                        [[NSFileManager defaultManager]
+                            removeItemAtURL:cache_url error:nil];
+                    }
+                }
+            }
+        }
         if (executable == nil)
             throw std::runtime_error(
                 "failed to compile the Metal presentation graph");
@@ -1167,10 +1230,44 @@ private:
         plan.executable = executable;
         plan.width = width;
         plan.height = height;
-        plan.output_width = output_width;
-        plan.output_height = output_height;
+        plan.output_width = width;
+        plan.output_height = height;
         plan.presentation = true;
         return plans_.emplace(key, std::move(plan)).first->second;
+    }
+
+    NSURL* presentation_cache_url(int width, int height) const {
+        if (@available(macOS 14.0, *)) {
+            const ModelDerivation& derivation = model_.derivation();
+            if (!derivation.present) return nil;
+            NSArray<NSString*>* cache_directories =
+                NSSearchPathForDirectoriesInDomains(
+                    NSCachesDirectory, NSUserDomainMask, YES);
+            if (cache_directories.count == 0u) return nil;
+            NSString* directory = [cache_directories.firstObject
+                stringByAppendingPathComponent:
+                    @"DepthExtractor/DAV2MetalGraphCache-v1"];
+            NSError* error = nil;
+            if (![[NSFileManager defaultManager]
+                    createDirectoryAtPath:directory
+                    withIntermediateDirectories:YES
+                    attributes:nil error:&error]) {
+                return nil;
+            }
+            const NSOperatingSystemVersion os =
+                NSProcessInfo.processInfo.operatingSystemVersion;
+            const std::string key = hexadecimal(
+                derivation.canonical_sha256) + "-" +
+                std::to_string(static_cast<unsigned>(encoder_)) + "-" +
+                std::to_string(width) + "x" + std::to_string(height) + "-" +
+                (fp16_ ? "fp16" : "fp32") + "-" +
+                std::to_string(device_.registryID) + "-macos" +
+                std::to_string(os.majorVersion) + "." +
+                std::to_string(os.minorVersion) + ".mpsgraphpackage";
+            return [NSURL fileURLWithPath:[directory
+                stringByAppendingPathComponent:name(key)]];
+        }
+        return nil;
     }
 
     ModelFile model_;

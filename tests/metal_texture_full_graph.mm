@@ -37,6 +37,14 @@ bool wait_for_job(dav2_gpu_job* job) {
     return false;
 }
 
+uint32_t environment_u32(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    const unsigned long parsed = std::strtoul(value, nullptr, 10);
+    return parsed == 0ul || parsed > UINT32_MAX
+        ? fallback : static_cast<uint32_t>(parsed);
+}
+
 }  // namespace
 
 int main() {
@@ -46,9 +54,9 @@ int main() {
         return 77;
     }
     @autoreleasepool {
-        constexpr uint32_t width = 336u;
-        constexpr uint32_t height = 210u;
-        constexpr uint32_t input_size = 140u;
+        const uint32_t width = environment_u32("DAV2_TEST_WIDTH", 3360u);
+        const uint32_t height = environment_u32("DAV2_TEST_HEIGHT", 2100u);
+        const uint32_t input_size = environment_u32("DAV2_TEST_INPUT", 280u);
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) {
             std::cerr << "Metal device is unavailable\n";
@@ -99,7 +107,11 @@ int main() {
             sizeof(options), DAV2_ABI_VERSION, DAV2_ENCODER_VITS, 0,
             DAV2_CREATE_FORCE_METAL | DAV2_CREATE_FORCE_FP16};
         dav2_context* context = nullptr;
+        const auto create_start = std::chrono::steady_clock::now();
         dav2_status status = dav2_create(model_path, &options, &context);
+        const double create_elapsed =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - create_start).count();
         if (status != DAV2_STATUS_OK) {
             std::cerr << "create: " << dav2_last_error() << '\n';
             return 3;
@@ -146,6 +158,8 @@ int main() {
             const double elapsed =
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
+            std::cout << "DAV2_METAL_FRAME iteration=" << iteration
+                      << " elapsed_ms=" << elapsed << '\n';
             dav2_gpu_job_release(job);
             if (!completed) {
                 dav2_destroy(context);
@@ -154,7 +168,9 @@ int main() {
             if (iteration > 1u) samples.push_back(elapsed);
         }
 
-        constexpr NSUInteger row_bytes = 1536u;
+        const NSUInteger row_bytes =
+            ((static_cast<NSUInteger>(width) * sizeof(float) + 255u) / 256u) *
+            256u;
         const NSUInteger buffer_size = row_bytes * height;
         id<MTLBuffer> readback = [device
             newBufferWithLength:buffer_size
@@ -203,6 +219,7 @@ int main() {
             return 9;
         }
         std::sort(samples.begin(), samples.end());
+        std::cout << "DAV2_METAL_CREATE elapsed_ms=" << create_elapsed << '\n';
         std::cout << "Metal texture full graph median: "
                   << samples[samples.size() / 2u] << " ms, range "
                   << minimum << " .. " << maximum << '\n';
