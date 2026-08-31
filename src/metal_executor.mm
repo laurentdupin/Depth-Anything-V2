@@ -1,6 +1,7 @@
 #include "executor.h"
 #include "image.h"
 #include "model.h"
+#include "inferbridge/native_harness_metal_texture.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -752,115 +753,6 @@ void dispatch_2d(
         threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1u)];
 }
 
-class MetalTensorPool final
-    : public std::enable_shared_from_this<MetalTensorPool> {
-private:
-    struct Slot {
-        int width = 0;
-        int height = 0;
-        bool leased = false;
-        id<MTLBuffer> normalized = nil;
-        id<MTLBuffer> presentation = nil;
-        MPSGraphTensorData* input_data = nil;
-        MPSGraphTensorData* output_data = nil;
-    };
-
-public:
-    class Lease final {
-    public:
-        Lease(
-            std::shared_ptr<MetalTensorPool> pool,
-            std::shared_ptr<Slot> slot)
-            : pool_(std::move(pool)), slot_(std::move(slot)) {}
-
-        ~Lease() {
-            if (pool_ && slot_) pool_->release(slot_);
-        }
-
-        id<MTLBuffer> normalized() const { return slot_->normalized; }
-        id<MTLBuffer> presentation() const { return slot_->presentation; }
-        MPSGraphTensorData* input_data() const { return slot_->input_data; }
-        MPSGraphTensorData* output_data() const { return slot_->output_data; }
-
-    private:
-        std::shared_ptr<MetalTensorPool> pool_;
-        std::shared_ptr<Slot> slot_;
-    };
-
-    void reset(id<MTLDevice> device) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        for (const std::shared_ptr<Slot>& slot : slots_) {
-            if (slot->leased) {
-                throw std::runtime_error(
-                    "cannot replace the Metal device while tensor buffers "
-                    "are in flight");
-            }
-        }
-        device_ = device;
-        slots_.clear();
-    }
-
-    std::shared_ptr<Lease> acquire(int width, int height) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        for (const std::shared_ptr<Slot>& slot : slots_) {
-            if (!slot->leased && slot->width == width &&
-                slot->height == height) {
-                slot->leased = true;
-                return std::make_shared<Lease>(shared_from_this(), slot);
-            }
-        }
-        if (device_ == nil) {
-            throw std::runtime_error("Metal tensor pool has no device");
-        }
-        const std::uint64_t normalized_bytes =
-            static_cast<std::uint64_t>(width) * height * 3u * sizeof(float);
-        const std::uint64_t presentation_bytes =
-            static_cast<std::uint64_t>(width) * height * sizeof(float);
-        if (normalized_bytes > std::numeric_limits<NSUInteger>::max() ||
-            presentation_bytes > std::numeric_limits<NSUInteger>::max()) {
-            throw std::overflow_error("Metal inference tensors are too large");
-        }
-        std::shared_ptr<Slot> slot = std::make_shared<Slot>();
-        slot->width = width;
-        slot->height = height;
-        slot->leased = true;
-        slot->normalized = [device_
-            newBufferWithLength:static_cast<NSUInteger>(normalized_bytes)
-            options:MTLResourceStorageModePrivate];
-        slot->presentation = [device_
-            newBufferWithLength:static_cast<NSUInteger>(presentation_bytes)
-            options:MTLResourceStorageModePrivate];
-        if (slot->normalized == nil || slot->presentation == nil) {
-            throw std::bad_alloc();
-        }
-        slot->normalized.label = @"InferBridge DA V2 - Normalized Input";
-        slot->presentation.label = @"InferBridge DA V2 - Presentation Output";
-        slot->input_data = [[MPSGraphTensorData alloc]
-            initWithMTLBuffer:slot->normalized
-            shape:shape({1, 3, height, width})
-            dataType:MPSDataTypeFloat32];
-        slot->output_data = [[MPSGraphTensorData alloc]
-            initWithMTLBuffer:slot->presentation
-            shape:shape({1, 1, height, width})
-            dataType:MPSDataTypeFloat32];
-        if (slot->input_data == nil || slot->output_data == nil) {
-            throw std::bad_alloc();
-        }
-        slots_.push_back(slot);
-        return std::make_shared<Lease>(shared_from_this(), slot);
-    }
-
-private:
-    void release(const std::shared_ptr<Slot>& slot) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        slot->leased = false;
-    }
-
-    id<MTLDevice> device_ = nil;
-    std::vector<std::shared_ptr<Slot>> slots_;
-    std::mutex mutex_;
-};
-
 class MetalGpuJob final : public GpuJob {
 public:
     MetalGpuJob(
@@ -868,7 +760,8 @@ public:
         id<MTLSharedEvent> input_event,
         id<MTLTexture> output_texture,
         id<MTLSharedEvent> output_event,
-        std::shared_ptr<MetalTensorPool::Lease> tensors,
+        std::shared_ptr<inferbridge::native_harness::metal::TensorPool::Lease>
+            tensors,
         id<MTLCommandBuffer> completion,
         std::uint64_t signal_value)
         : input_texture_(input_texture), input_event_(input_event),
@@ -911,7 +804,8 @@ private:
     id<MTLSharedEvent> input_event_ = nil;
     id<MTLTexture> output_texture_ = nil;
     id<MTLSharedEvent> output_event_ = nil;
-    std::shared_ptr<MetalTensorPool::Lease> tensors_;
+    std::shared_ptr<inferbridge::native_harness::metal::TensorPool::Lease>
+        tensors_;
     id<MTLCommandBuffer> completion_ = nil;
     std::uint64_t signal_value_ = 0u;
     std::atomic<bool> cancelled_{false};
@@ -1078,13 +972,15 @@ public:
         @autoreleasepool {
             MetalPlan& plan = get_presentation_plan(
                 network.width, network.height);
-            std::shared_ptr<MetalTensorPool::Lease> tensors =
+            std::shared_ptr<inferbridge::native_harness::metal::TensorPool::Lease>
+                tensors =
                 tensor_pool_->acquire(network.width, network.height);
-            id<MTLBuffer> normalized = tensors->normalized();
-            id<MTLBuffer> presentation = tensors->presentation();
+            id<MTLBuffer> normalized = tensors->input();
+            id<MTLBuffer> presentation = tensors->output();
 
             id<MTLCommandBuffer> preprocess_command = [queue_ commandBuffer];
-            preprocess_command.label = @"InferBridge DA V2 - Preprocess";
+            inferbridge::native_harness::metal::label_command(
+                preprocess_command, "DA V2", "Preprocess");
             if (wait_event != nil) {
                 [preprocess_command encodeWaitForEvent:wait_event
                                                  value:request.wait_fence_value];
@@ -1094,7 +990,8 @@ public:
             if (preprocess_encoder == nil)
                 throw std::runtime_error(
                     "could not encode DAV2 Metal preprocessing");
-            preprocess_encoder.label = @"InferBridge DA V2 - Preprocess";
+            inferbridge::native_harness::metal::label_encoder(
+                preprocess_encoder, "DA V2", "Preprocess");
             struct PreprocessParameters {
                 std::uint32_t source_width;
                 std::uint32_t source_height;
@@ -1129,13 +1026,15 @@ public:
                     "Metal graph did not bind its presentation output");
 
             id<MTLCommandBuffer> completion = [queue_ commandBuffer];
-            completion.label = @"InferBridge DA V2 - Present Depth";
+            inferbridge::native_harness::metal::label_command(
+                completion, "DA V2", "Present Depth");
             id<MTLComputeCommandEncoder> copy_encoder =
                 [completion computeCommandEncoder];
             if (copy_encoder == nil)
                 throw std::runtime_error(
                     "could not encode DAV2 Metal output copy");
-            copy_encoder.label = @"InferBridge DA V2 - Present Depth";
+            inferbridge::native_harness::metal::label_encoder(
+                copy_encoder, "DA V2", "Present Depth");
             [copy_encoder setComputePipelineState:copy_pipeline_];
             [copy_encoder setBuffer:presentation offset:0u atIndex:0u];
             [copy_encoder setTexture:output_texture atIndex:0u];
@@ -1180,7 +1079,7 @@ private:
             throw std::runtime_error("Metal is unavailable on this Mac");
         device_ = device;
         queue_ = [device_ newCommandQueue];
-        queue_.label = @"InferBridge DA V2";
+        inferbridge::native_harness::metal::label_queue(queue_, "DA V2");
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize the Metal executor");
@@ -1219,7 +1118,8 @@ private:
                     description);
         }
         plans_.clear();
-        tensor_pool_->reset(device_);
+        tensor_pool_ = std::make_shared<
+            inferbridge::native_harness::metal::TensorPool>(device_, "DA V2");
     }
 
     MetalPlan& get_plan(
@@ -1373,8 +1273,8 @@ private:
     id<MTLComputePipelineState> copy_pipeline_ = nil;
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<PlanKey, MetalPlan, PlanKeyHash> plans_;
-    std::shared_ptr<MetalTensorPool> tensor_pool_ =
-        std::make_shared<MetalTensorPool>();
+    std::shared_ptr<inferbridge::native_harness::metal::TensorPool>
+        tensor_pool_;
     std::mutex mutex_;
     std::atomic<std::uint64_t> upload_bytes_{0u};
     std::atomic<std::uint64_t> download_bytes_{0u};
