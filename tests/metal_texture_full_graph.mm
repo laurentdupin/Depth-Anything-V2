@@ -45,6 +45,40 @@ uint32_t environment_u32(const char* name, uint32_t fallback) {
         ? fallback : static_cast<uint32_t>(parsed);
 }
 
+std::uint64_t output_signature(id<MTLDevice> device, id<MTLTexture> output,
+    std::uint32_t width, std::uint32_t height) {
+    const NSUInteger row_bytes =
+        ((static_cast<NSUInteger>(width) * sizeof(float) + 255u) / 256u) *
+        256u;
+    const NSUInteger buffer_size = row_bytes * height;
+    id<MTLBuffer> readback = [device
+        newBufferWithLength:buffer_size options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    [blit copyFromTexture:output sourceSlice:0u sourceLevel:0u
+            sourceOrigin:MTLOriginMake(0u, 0u, 0u)
+              sourceSize:MTLSizeMake(width, height, 1u)
+                toBuffer:readback destinationOffset:0u
+      destinationBytesPerRow:row_bytes
+    destinationBytesPerImage:buffer_size];
+    [blit endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    std::uint64_t signature = 1469598103934665603ull;
+    for (std::uint32_t y = 0u; y < height; ++y) {
+        const auto* row = static_cast<const std::uint8_t*>(readback.contents) +
+            static_cast<std::size_t>(y) * row_bytes;
+        for (std::uint32_t x = 0u; x < width * sizeof(float); ++x) {
+            signature ^= row[x];
+            signature *= 1099511628211ull;
+        }
+    }
+    [readback release];
+    [queue release];
+    return signature;
+}
+
 }  // namespace
 
 int main() {
@@ -134,7 +168,21 @@ int main() {
             return 4;
         }
         std::vector<double> samples;
+        std::vector<std::uint64_t> signatures;
         for (uint64_t iteration = 1u; iteration <= 5u; ++iteration) {
+            for (uint32_t y = 0u; y < height; ++y) {
+                for (uint32_t x = 0u; x < width; ++x) {
+                    const size_t offset =
+                        (static_cast<size_t>(y) * width + x) * 4u;
+                    const bool high = ((x / 32u) + (y / 32u) + iteration) % 2u;
+                    pixels[offset] = high ? 240u : 12u;
+                    pixels[offset + 1u] = high ? 32u : 220u;
+                    pixels[offset + 2u] = high ? 48u : 200u;
+                }
+            }
+            [input replaceRegion:MTLRegionMake2D(0u, 0u, width, height)
+                     mipmapLevel:0u withBytes:pixels.data()
+                     bytesPerRow:width * 4u];
             const dav2_metal_texture_binding_request request{
                 sizeof(request), DAV2_ABI_VERSION,
                 reinterpret_cast<uintptr_t>(input),
@@ -165,7 +213,18 @@ int main() {
                 dav2_destroy(context);
                 return 6;
             }
+            const std::uint64_t signature = output_signature(
+                device, output, width, height);
+            signatures.push_back(signature);
+            std::cout << "DAV2_METAL_OUTPUT iteration=" << iteration
+                      << " signature=" << signature << '\n';
             if (iteration > 1u) samples.push_back(elapsed);
+        }
+        if (std::all_of(signatures.begin() + 1u, signatures.end(),
+                [&](std::uint64_t value) { return value == signatures[0]; })) {
+            std::cerr << "Metal texture output remained fixed across changing inputs\n";
+            dav2_destroy(context);
+            return 10;
         }
 
         const NSUInteger row_bytes =
