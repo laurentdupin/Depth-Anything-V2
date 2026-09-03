@@ -270,6 +270,7 @@ void DinoEncoder::linear(
             std::getenv("DAV2_DISABLE_MATRIX2_FP32_INPUT");
         const bool transposed =
             context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
+            rows >= 128 &&
             weight.half_transposed_buffer.size() != 0 &&
             (disable_prepack == nullptr || disable_prepack[0] == '\0' ||
              disable_prepack[0] == '0') &&
@@ -285,6 +286,7 @@ void DinoEncoder::linear(
         const char* disabled = std::getenv("DAV2_DISABLE_MATRIX2_INT8");
         const bool transposed =
             context_.compute_capabilities().cooperative_matrix_workgroup_int8_nv &&
+            rows >= 128 &&
             weight.int8_transposed_buffer.size() != 0 &&
             (disabled == nullptr || disabled[0] == '\0' || disabled[0] == '0');
         operators_.linear_int8(
@@ -343,6 +345,7 @@ EncoderOutput DinoEncoder::forward(
         std::getenv("DAV2_DISABLE_MATRIX2_PREPACK");
     const bool matrix2_prepack =
         precision_ == inferbridge::native::Precision::fp16 &&
+        tokens >= 128 &&
         context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
         (disable_matrix2_prepack == nullptr ||
          disable_matrix2_prepack[0] == '\0' ||

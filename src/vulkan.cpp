@@ -1,5 +1,7 @@
 #include "vulkan.h"
 
+#include "inferbridge/native_harness_cooperative_matrix.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -442,6 +444,21 @@ VulkanContext::VulkanContext(
             }
         }
     }
+    const auto cooperative_matrix_path =
+        inferbridge::native::requested_cooperative_matrix_path();
+    if (!inferbridge::native::cooperative_matrix_khr_allowed(
+            cooperative_matrix_path)) {
+        compute_capabilities_.cooperative_matrix_fp16 = false;
+        compute_capabilities_.cooperative_matrix_workgroup_nv = false;
+        compute_capabilities_.cooperative_matrix_workgroup_int8_nv = false;
+        compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv = false;
+    } else if (!inferbridge::native::cooperative_matrix2_nv_allowed(
+                   cooperative_matrix_path)) {
+        compute_capabilities_.cooperative_matrix_workgroup_nv = false;
+        compute_capabilities_.cooperative_matrix_workgroup_int8_nv = false;
+        compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv = false;
+    }
+    // Retain the DA V2-specific switches for existing diagnostics and scripts.
     if (const char* disabled =
             std::getenv("DAV2_DISABLE_COOPERATIVE_MATRIX")) {
         if (disabled[0] != '\0' && disabled[0] != '0') {

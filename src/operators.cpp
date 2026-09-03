@@ -1605,6 +1605,8 @@ void VulkanOperators::conv2d(
     const bool pointwise_matrix2 = pointwise && half_weight &&
         context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
         std::uint64_t(output_width) * output_height >= 128 &&
+        (std::uint64_t(output_width) * output_height) % 32 == 0 &&
+        input_channels % 16 == 0 && output_channels % 32 == 0 &&
         (disable_pointwise_matrix2 == nullptr ||
          disable_pointwise_matrix2[0] == '\0' ||
          disable_pointwise_matrix2[0] == '0');

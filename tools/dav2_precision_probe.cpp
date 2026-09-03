@@ -182,6 +182,11 @@ int main(int argc, char** argv) {
                       << " normalized_rmse=" << normalized_rmse
                       << " correlation=" << correlation;
         std::cout << '\n';
+        if ((flags & (DAV2_CREATE_FORCE_FP16 | DAV2_CREATE_FORCE_INT8)) != 0u &&
+            (correlation < 0.95 || normalized_rmse > 0.15)) {
+            throw std::runtime_error(
+                "reduced-precision output diverged from FP32 reference");
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
