@@ -72,7 +72,9 @@ int main(void) {
 #endif
     CHECK(capabilities.maximum_inputs == 1u);
     CHECK(capabilities.maximum_outputs == 1u);
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32)
+    CHECK(capabilities.maximum_in_flight_jobs == 5u);
+#elif defined(__APPLE__)
     CHECK(capabilities.maximum_in_flight_jobs == 3u);
 #else
     CHECK(capabilities.maximum_in_flight_jobs == 1u);

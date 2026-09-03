@@ -1014,9 +1014,9 @@ int main() try {
         std::cout << "complete D3D12/Vulkan interop unavailable\n";
         return 77;
     }
-    if (capabilities.maximum_in_flight_jobs != 3) {
+    if (capabilities.maximum_in_flight_jobs != 5) {
         throw std::runtime_error(
-            "DAV2 did not report the three-slot GPU job pool");
+            "DAV2 did not report the five-slot Windows GPU job pool");
     }
     ComPtr<ID3D12Device> device =
         matching_device(capabilities.adapter_luid);
@@ -1466,7 +1466,7 @@ int main() try {
         IBRH_CAP_GPU_RESIDENT_OUTPUT;
     if ((harness_capabilities.flags & required_harness_flags) !=
             required_harness_flags ||
-        harness_capabilities.maximum_in_flight_jobs != 3u) {
+        harness_capabilities.maximum_in_flight_jobs != 5u) {
         throw std::runtime_error(
             "InferBridge GPU texture capabilities are incomplete");
     }

@@ -50,7 +50,8 @@ public:
         std::uint32_t rows,
         std::uint32_t input_columns,
         std::uint32_t output_columns,
-        bool gelu);
+        bool gelu,
+        bool weight_transposed);
     void linear_fp16_half_output_gelu(
         VulkanBuffer& half_output,
         const VulkanBuffer& input,
@@ -58,7 +59,8 @@ public:
         const VulkanBuffer& bias,
         std::uint32_t rows,
         std::uint32_t input_columns,
-        std::uint32_t output_columns);
+        std::uint32_t output_columns,
+        bool weight_transposed);
     void linear_fp16_half_input(
         VulkanBuffer& output,
         const VulkanBuffer& half_input,
@@ -66,7 +68,17 @@ public:
         const VulkanBuffer& bias,
         std::uint32_t rows,
         std::uint32_t input_columns,
-        std::uint32_t output_columns);
+        std::uint32_t output_columns,
+        bool weight_transposed);
+    void linear_fp16_half_input_output_gelu(
+        VulkanBuffer& half_output,
+        const VulkanBuffer& half_input,
+        const VulkanBuffer& half_weight,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t input_columns,
+        std::uint32_t output_columns,
+        bool weight_transposed);
     void linear_int8(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -76,10 +88,19 @@ public:
         std::uint32_t rows,
         std::uint32_t input_columns,
         std::uint32_t output_columns,
-        bool gelu);
+        bool gelu,
+        bool weight_transposed = false);
 
     void layer_norm(
         VulkanBuffer& output,
+        const VulkanBuffer& input,
+        const VulkanBuffer& weight,
+        const VulkanBuffer& bias,
+        std::uint32_t rows,
+        std::uint32_t columns,
+        float epsilon);
+    void layer_norm_fp16(
+        VulkanBuffer& half_output,
         const VulkanBuffer& input,
         const VulkanBuffer& weight,
         const VulkanBuffer& bias,
@@ -300,16 +321,26 @@ private:
     VulkanPipeline pack_fp16_;
     VulkanPipeline linear_vec16_fp16_;
     VulkanPipeline linear_vec16_fp16_output_gelu_;
+    VulkanPipeline linear_coop_fp16_;
+    VulkanPipeline linear_coop_tall_fp16_;
+    VulkanPipeline linear_coop_fp16_output_gelu_;
+    VulkanPipeline linear_coop_workgroup_nv_fp16_;
+    VulkanPipeline linear_coop_workgroup_nv_fp16_output_gelu_;
+    VulkanPipeline linear_coop_workgroup_nv_fp16_transposed_;
+    VulkanPipeline linear_coop_workgroup_nv_fp16_transposed_output_gelu_;
     VulkanPipeline quantize_rows_int8_fused_;
     VulkanPipeline linear_int8_tiled_;
+    VulkanPipeline linear_coop_workgroup_nv_int8_transposed_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
+    VulkanPipeline layer_norm_fp16_;
     VulkanPipeline add_scaled_;
     VulkanPipeline bmm_;
     VulkanPipeline bmm_score_half_;
     VulkanPipeline bmm_value_half_;
     VulkanPipeline bmm_score_fp16_;
     VulkanPipeline bmm_value_fp16_;
+    VulkanPipeline bmm_score_coop_fp16_;
     VulkanPipeline softmax_lastdim_;
     VulkanPipeline softmax_lastdim_half_;
     VulkanPipeline prepare_tokens_;
@@ -323,8 +354,12 @@ private:
     VulkanPipeline project_tokens_fp16_;
     VulkanPipeline conv2d_;
     VulkanPipeline conv2d_pointwise_gemm_;
+    VulkanPipeline conv2d_pointwise_gemm_half_;
+    VulkanPipeline conv2d_pointwise_coop_workgroup_nv_fp16_;
     VulkanPipeline conv2d_tiled16x8_;
+    VulkanPipeline conv2d_tiled16x8_half_;
     VulkanPipeline conv2d_stride2_tiled8x8_;
+    VulkanPipeline conv2d_stride2_tiled8x8_half_;
     VulkanPipeline conv2d8_;
     VulkanPipeline conv2d_half_;
     VulkanPipeline conv2d_fp16_;

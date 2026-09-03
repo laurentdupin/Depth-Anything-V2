@@ -16,7 +16,9 @@ std::uint32_t crc32(const void* data, std::size_t bytes);
 struct GpuTensor {
     VulkanBuffer buffer;
     VulkanBuffer half_buffer;
+    VulkanBuffer half_transposed_buffer;
     VulkanBuffer int8_buffer;
+    VulkanBuffer int8_transposed_buffer;
     VulkanBuffer int8_scales;
     std::array<std::uint64_t, 4> dimensions{};
     std::uint32_t rank = 0;

@@ -13,10 +13,15 @@
 #include "bmm_value_half_spv.h"
 #include "bmm_score_fp16_spv.h"
 #include "bmm_value_fp16_spv.h"
+#include "bmm_score_coop_fp16_spv.h"
 #include "conv2d_spv.h"
 #include "conv2d_pointwise_gemm_spv.h"
+#include "conv2d_pointwise_gemm_half_spv.h"
+#include "conv2d_pointwise_coop_workgroup_nv_fp16_spv.h"
 #include "conv2d_tiled16x8_spv.h"
+#include "conv2d_tiled16x8_half_spv.h"
 #include "conv2d_stride2_tiled8x8_spv.h"
+#include "conv2d_stride2_tiled8x8_half_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d_fp16_spv.h"
@@ -32,6 +37,7 @@
 #include "conv_transpose_int8_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
+#include "layer_norm_fp16_spv.h"
 #include "linear_spv.h"
 #include "linear16_spv.h"
 #include "linear_half_spv.h"
@@ -50,8 +56,16 @@
 #include "pack_fp16_spv.h"
 #include "linear_vec16_fp16_spv.h"
 #include "linear_vec16_fp16_output_gelu_spv.h"
+#include "linear_coop_fp16_spv.h"
+#include "linear_coop_tall_fp16_spv.h"
+#include "linear_coop_fp16_output_gelu_spv.h"
+#include "linear_coop_workgroup_nv_fp16_spv.h"
+#include "linear_coop_workgroup_nv_fp16_output_gelu_spv.h"
+#include "linear_coop_workgroup_nv_fp16_transposed_spv.h"
+#include "linear_coop_workgroup_nv_fp16_transposed_output_gelu_spv.h"
 #include "quantize_rows_int8_fused_spv.h"
 #include "linear_int8_tiled_spv.h"
+#include "linear_coop_workgroup_nv_int8_transposed_spv.h"
 #include "prepare_tokens_spv.h"
 #include "prepare_tokens_fp16_spv.h"
 #include "copy_class_token_spv.h"
@@ -64,6 +78,7 @@
 #include "softmax_lastdim_spv.h"
 #include "softmax_lastdim_half_spv.h"
 
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -244,12 +259,21 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv2d_pointwise_gemm_(context.create_pipeline(
           dav2_conv2d_pointwise_gemm_spv,
           dav2_conv2d_pointwise_gemm_spv_size, 4, 40)),
+      conv2d_pointwise_gemm_half_(context.create_pipeline(
+          dav2_conv2d_pointwise_gemm_half_spv,
+          dav2_conv2d_pointwise_gemm_half_spv_size, 4, 40)),
       conv2d_tiled16x8_(context.create_pipeline(
           dav2_conv2d_tiled16x8_spv,
           dav2_conv2d_tiled16x8_spv_size, 4, 40)),
+      conv2d_tiled16x8_half_(context.create_pipeline(
+          dav2_conv2d_tiled16x8_half_spv,
+          dav2_conv2d_tiled16x8_half_spv_size, 4, 40)),
       conv2d_stride2_tiled8x8_(context.create_pipeline(
           dav2_conv2d_stride2_tiled8x8_spv,
           dav2_conv2d_stride2_tiled8x8_spv_size, 4, 40)),
+      conv2d_stride2_tiled8x8_half_(context.create_pipeline(
+          dav2_conv2d_stride2_tiled8x8_half_spv,
+          dav2_conv2d_stride2_tiled8x8_half_spv_size, 4, 40)),
       conv2d8_(context.create_pipeline(
           dav2_conv2d8_spv, dav2_conv2d8_spv_size, 4, 40)),
       conv2d_half_(context.create_pipeline(
@@ -327,10 +351,21 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         linear_vec16_fp16_output_gelu_ = context_.create_pipeline(
             dav2_linear_vec16_fp16_output_gelu_spv,
             dav2_linear_vec16_fp16_output_gelu_spv_size, 4, 12);
+        layer_norm_fp16_ = context_.create_pipeline(
+            dav2_layer_norm_fp16_spv,
+            dav2_layer_norm_fp16_spv_size, 4, 12);
         pack_fp16_.set_debug_name("pack_fp16");
         linear_vec16_fp16_.set_debug_name("linear_vec16_fp16");
         linear_vec16_fp16_output_gelu_.set_debug_name(
             "linear_vec16_fp16_output_gelu");
+        layer_norm_fp16_.set_debug_name("layer_norm_fp16");
+        if (context_.compute_capabilities().cooperative_matrix_fp16) {
+            linear_coop_fp16_output_gelu_ = context_.create_pipeline(
+                dav2_linear_coop_fp16_output_gelu_spv,
+                dav2_linear_coop_fp16_output_gelu_spv_size, 4, 12);
+            linear_coop_fp16_output_gelu_.set_debug_name(
+                "linear_coop_fp16_output_gelu");
+        }
     }
     if (context_.compute_capabilities().packed_int8_dot) {
         quantize_rows_int8_fused_ = context_.create_pipeline(
@@ -378,6 +413,63 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         conv_transpose_nonoverlap_fp16_.set_debug_name(
             "conv_transpose_nonoverlap_fp16");
     }
+    if (context_.compute_capabilities().cooperative_matrix_fp16) {
+        bmm_score_coop_fp16_ = context_.create_pipeline(
+            dav2_bmm_score_coop_fp16_spv,
+            dav2_bmm_score_coop_fp16_spv_size, 2, 8);
+        bmm_score_coop_fp16_.set_debug_name("bmm_score_coop_fp16");
+        linear_coop_fp16_ = context_.create_pipeline(
+            dav2_linear_coop_fp16_spv,
+            dav2_linear_coop_fp16_spv_size, 4, 12);
+        linear_coop_fp16_.set_debug_name("linear_coop_fp16");
+        linear_coop_tall_fp16_ = context_.create_pipeline(
+            dav2_linear_coop_tall_fp16_spv,
+            dav2_linear_coop_tall_fp16_spv_size, 4, 12);
+        linear_coop_tall_fp16_.set_debug_name("linear_coop_tall_fp16");
+    }
+    if (context_.compute_capabilities().cooperative_matrix_workgroup_nv) {
+        conv2d_pointwise_coop_workgroup_nv_fp16_ = context_.create_pipeline(
+            dav2_conv2d_pointwise_coop_workgroup_nv_fp16_spv,
+            dav2_conv2d_pointwise_coop_workgroup_nv_fp16_spv_size, 4, 12);
+        conv2d_pointwise_coop_workgroup_nv_fp16_.set_debug_name(
+            "conv2d_pointwise_coop_workgroup_nv_fp16");
+        linear_coop_workgroup_nv_fp16_ = context_.create_pipeline(
+            dav2_linear_coop_workgroup_nv_fp16_spv,
+            dav2_linear_coop_workgroup_nv_fp16_spv_size, 4, 12);
+        linear_coop_workgroup_nv_fp16_.set_debug_name(
+            "linear_coop_workgroup_nv_fp16");
+        linear_coop_workgroup_nv_fp16_transposed_ =
+            context_.create_pipeline(
+                dav2_linear_coop_workgroup_nv_fp16_transposed_spv,
+                dav2_linear_coop_workgroup_nv_fp16_transposed_spv_size,
+                4, 12);
+        linear_coop_workgroup_nv_fp16_transposed_.set_debug_name(
+            "linear_coop_workgroup_nv_fp16_transposed");
+    }
+    if (context_.compute_capabilities().cooperative_matrix_workgroup_int8_nv) {
+        linear_coop_workgroup_nv_int8_transposed_ = context_.create_pipeline(
+            dav2_linear_coop_workgroup_nv_int8_transposed_spv,
+            dav2_linear_coop_workgroup_nv_int8_transposed_spv_size, 6, 12);
+        linear_coop_workgroup_nv_int8_transposed_.set_debug_name(
+            "linear_coop_workgroup_nv_int8_transposed");
+    }
+    if (context_.compute_capabilities()
+            .cooperative_matrix_workgroup_epilogue_nv) {
+        linear_coop_workgroup_nv_fp16_output_gelu_ =
+            context_.create_pipeline(
+                dav2_linear_coop_workgroup_nv_fp16_output_gelu_spv,
+                dav2_linear_coop_workgroup_nv_fp16_output_gelu_spv_size,
+                4, 12);
+        linear_coop_workgroup_nv_fp16_output_gelu_.set_debug_name(
+            "linear_coop_workgroup_nv_fp16_output_gelu");
+        linear_coop_workgroup_nv_fp16_transposed_output_gelu_ =
+            context_.create_pipeline(
+                dav2_linear_coop_workgroup_nv_fp16_transposed_output_gelu_spv,
+                dav2_linear_coop_workgroup_nv_fp16_transposed_output_gelu_spv_size,
+                4, 12);
+        linear_coop_workgroup_nv_fp16_transposed_output_gelu_.set_debug_name(
+            "linear_coop_workgroup_nv_fp16_transposed_output_gelu");
+    }
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -415,9 +507,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d_.set_debug_name("conv2d");
     conv2d_pointwise_gemm_.set_debug_name(
         "conv2d_pointwise_gemm");
+    conv2d_pointwise_gemm_half_.set_debug_name(
+        "conv2d_pointwise_gemm_half");
     conv2d_tiled16x8_.set_debug_name("conv2d_tiled16x8");
+    conv2d_tiled16x8_half_.set_debug_name("conv2d_tiled16x8_half");
     conv2d_stride2_tiled8x8_.set_debug_name(
         "conv2d_stride2_tiled8x8");
+    conv2d_stride2_tiled8x8_half_.set_debug_name(
+        "conv2d_stride2_tiled8x8_half");
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
@@ -448,7 +545,8 @@ void VulkanOperators::linear_fp16(
     std::uint32_t rows,
     std::uint32_t input_columns,
     std::uint32_t output_columns,
-    bool gelu) {
+    bool gelu,
+    bool weight_transposed) {
     if (!context_.compute_capabilities().fp16) {
         throw std::runtime_error(
             "native FP16 linear operation is unavailable on this Vulkan device");
@@ -481,10 +579,20 @@ void VulkanOperators::linear_fp16(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
+    const char* disable_matrix2 =
+        std::getenv("DAV2_DISABLE_MATRIX2_FP32_INPUT");
+    const bool workgroup_nv = !gelu && weight_transposed && rows >= 128 &&
+        context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
+        (disable_matrix2 == nullptr || disable_matrix2[0] == '\0' ||
+         disable_matrix2[0] == '0');
     context_.dispatch(
-        linear_vec16_fp16_, {&output, &packed_input, &half_weight, &bias},
+        workgroup_nv
+            ? linear_coop_workgroup_nv_fp16_transposed_
+            : linear_vec16_fp16_,
+        {&output, &packed_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, 64), divide_up(rows, 64));
+        divide_up(output_columns, workgroup_nv ? 32 : 64),
+        divide_up(rows, workgroup_nv ? 32 : 64));
     if (gelu) {
         struct GeluParameters { std::uint32_t count; } gelu_parameters{
             rows * output_columns};
@@ -501,7 +609,8 @@ void VulkanOperators::linear_fp16_half_output_gelu(
     const VulkanBuffer& bias,
     std::uint32_t rows,
     std::uint32_t input_columns,
-    std::uint32_t output_columns) {
+    std::uint32_t output_columns,
+    bool weight_transposed) {
     if (!context_.compute_capabilities().fp16) {
         throw std::runtime_error(
             "native FP16 linear operation is unavailable on this Vulkan device");
@@ -535,11 +644,22 @@ void VulkanOperators::linear_fp16_half_output_gelu(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
+    const bool cooperative =
+        context_.compute_capabilities().cooperative_matrix_fp16;
+    const bool workgroup_nv = rows >= 128 && context_.compute_capabilities()
+        .cooperative_matrix_workgroup_epilogue_nv;
     context_.dispatch(
-        linear_vec16_fp16_output_gelu_,
+        workgroup_nv
+            ? (weight_transposed
+                ? linear_coop_workgroup_nv_fp16_transposed_output_gelu_
+                : linear_coop_workgroup_nv_fp16_output_gelu_)
+            : cooperative
+            ? linear_coop_fp16_output_gelu_
+            : linear_vec16_fp16_output_gelu_,
         {&half_output, &packed_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, 64), divide_up(rows, 64));
+        divide_up(output_columns, workgroup_nv ? 32 : cooperative ? 16 : 64),
+        divide_up(rows, workgroup_nv ? 32 : cooperative ? 16 : 64));
 }
 
 void VulkanOperators::linear_fp16_half_input(
@@ -549,7 +669,8 @@ void VulkanOperators::linear_fp16_half_input(
     const VulkanBuffer& bias,
     std::uint32_t rows,
     std::uint32_t input_columns,
-    std::uint32_t output_columns) {
+    std::uint32_t output_columns,
+    bool weight_transposed) {
     if (!context_.compute_capabilities().fp16) {
         throw std::runtime_error(
             "native FP16 linear operation is unavailable on this Vulkan device");
@@ -571,11 +692,79 @@ void VulkanOperators::linear_fp16_half_input(
         std::uint32_t input_columns;
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
+    const bool cooperative =
+        context_.compute_capabilities().cooperative_matrix_fp16;
+    const bool workgroup_nv =
+        rows >= 128 &&
+        context_.compute_capabilities().cooperative_matrix_workgroup_nv;
+    // Sharing each weight tile across four subgroups wins once there are
+    // enough rows to amortize the larger workgroup. Small token grids retain
+    // the higher-occupancy one-subgroup cooperative tile.
+    const bool tall = cooperative && rows >= 256;
+    if (workgroup_nv) {
+        context_.dispatch(
+            weight_transposed
+                ? linear_coop_workgroup_nv_fp16_transposed_
+                : linear_coop_workgroup_nv_fp16_,
+            {&output, &half_input, &half_weight, &bias},
+            &parameters, sizeof(parameters),
+            divide_up(output_columns, 32), divide_up(rows, 32));
+        return;
+    }
     context_.dispatch(
-        linear_vec16_fp16_,
+        tall ? linear_coop_tall_fp16_
+            : cooperative ? linear_coop_fp16_ : linear_vec16_fp16_,
         {&output, &half_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, 64), divide_up(rows, 64));
+        divide_up(output_columns, cooperative ? 16 : 64),
+        divide_up(rows, tall ? 64 : cooperative ? 16 : 64));
+}
+
+void VulkanOperators::linear_fp16_half_input_output_gelu(
+    VulkanBuffer& half_output,
+    const VulkanBuffer& half_input,
+    const VulkanBuffer& half_weight,
+    const VulkanBuffer& bias,
+    std::uint32_t rows,
+    std::uint32_t input_columns,
+    std::uint32_t output_columns,
+    bool weight_transposed) {
+    if (!context_.compute_capabilities().fp16 || rows == 0 ||
+        input_columns == 0 || output_columns == 0 ||
+        input_columns % 4 != 0 || output_columns % 4 != 0) {
+        throw std::invalid_argument(
+            "invalid FP16 half-input/output linear dimensions");
+    }
+    require_half_elements(
+        half_input, std::uint64_t(rows) * input_columns, "input");
+    require_half_elements(
+        half_weight,
+        std::uint64_t(output_columns) * input_columns,
+        "weight");
+    require_bytes(bias, output_columns, "bias");
+    require_half_elements(
+        half_output, std::uint64_t(rows) * output_columns, "output");
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t input_columns;
+        std::uint32_t output_columns;
+    } parameters{rows, input_columns, output_columns};
+    const bool cooperative =
+        context_.compute_capabilities().cooperative_matrix_fp16;
+    const bool workgroup_nv = rows >= 128 && context_.compute_capabilities()
+        .cooperative_matrix_workgroup_epilogue_nv;
+    context_.dispatch(
+        workgroup_nv
+            ? (weight_transposed
+                ? linear_coop_workgroup_nv_fp16_transposed_output_gelu_
+                : linear_coop_workgroup_nv_fp16_output_gelu_)
+            : cooperative
+            ? linear_coop_fp16_output_gelu_
+            : linear_vec16_fp16_output_gelu_,
+        {&half_output, &half_input, &half_weight, &bias},
+        &parameters, sizeof(parameters),
+        divide_up(output_columns, workgroup_nv ? 32 : cooperative ? 16 : 64),
+        divide_up(rows, workgroup_nv ? 32 : cooperative ? 16 : 64));
 }
 
 void VulkanOperators::linear_int8(
@@ -587,7 +776,8 @@ void VulkanOperators::linear_int8(
     std::uint32_t rows,
     std::uint32_t input_columns,
     std::uint32_t output_columns,
-    bool gelu) {
+    bool gelu,
+    bool weight_transposed) {
     if (!context_.compute_capabilities().packed_int8_dot) {
         throw std::runtime_error(
             "accelerated INT8 linear operation is unavailable on this Vulkan device");
@@ -626,9 +816,25 @@ void VulkanOperators::linear_int8(
         quantize_rows_int8_fused_,
         {&packed_input, &input, &input_scales},
         &quantize_parameters, sizeof(quantize_parameters), rows);
-    linear_int8_packed(
-        output, packed_input, int8_weight, input_scales, weight_scales,
-        bias, rows, input_columns, output_columns, 0u, rows, false, true);
+    if (weight_transposed &&
+        context_.compute_capabilities().cooperative_matrix_workgroup_int8_nv &&
+        rows >= 128) {
+        struct Parameters {
+            std::uint32_t rows;
+            std::uint32_t input_columns;
+            std::uint32_t output_columns;
+        } parameters{rows, input_columns, output_columns};
+        context_.dispatch(
+            linear_coop_workgroup_nv_int8_transposed_,
+            {&output, &packed_input, &int8_weight, &input_scales,
+             &weight_scales, &bias},
+            &parameters, sizeof(parameters),
+            divide_up(output_columns, 32), divide_up(rows, 32));
+    } else {
+        linear_int8_packed(
+            output, packed_input, int8_weight, input_scales, weight_scales,
+            bias, rows, input_columns, output_columns, 0u, rows, false, true);
+    }
     if (gelu) {
         struct GeluParameters { std::uint32_t count; } gelu_parameters{
             rows * output_columns};
@@ -835,6 +1041,34 @@ void VulkanOperators::layer_norm(
         rows);
 }
 
+void VulkanOperators::layer_norm_fp16(
+    VulkanBuffer& half_output,
+    const VulkanBuffer& input,
+    const VulkanBuffer& weight,
+    const VulkanBuffer& bias,
+    std::uint32_t rows,
+    std::uint32_t columns,
+    float epsilon) {
+    if (!context_.compute_capabilities().fp16 || rows == 0 ||
+        columns == 0 || epsilon <= 0.0f) {
+        throw std::invalid_argument("invalid FP16 layer norm parameters");
+    }
+    require_bytes(input, std::uint64_t(rows) * columns, "input");
+    require_half_elements(
+        half_output, std::uint64_t(rows) * columns, "output");
+    require_bytes(weight, columns, "weight");
+    require_bytes(bias, columns, "bias");
+    struct Parameters {
+        std::uint32_t rows;
+        std::uint32_t columns;
+        float epsilon;
+    } parameters{rows, columns, epsilon};
+    context_.dispatch(
+        layer_norm_fp16_,
+        {&half_output, &input, &weight, &bias},
+        &parameters, sizeof(parameters), rows);
+}
+
 void VulkanOperators::add_scaled(
     VulkanBuffer& output,
     const VulkanBuffer& residual,
@@ -900,13 +1134,17 @@ void VulkanOperators::attention_head64(
             std::uint32_t tokens;
             std::uint32_t heads;
         } parameters{tokens, heads};
+        const bool cooperative =
+            context_.compute_capabilities().cooperative_matrix_fp16;
         context_.dispatch(
-            bmm_score_fp16_,
+            cooperative ? bmm_score_coop_fp16_ : bmm_score_fp16_,
             {&scores, &qkv},
             &parameters,
             sizeof(parameters),
-            divide_up(divide_up(tokens, 4), 8),
-            divide_up(divide_up(tokens, 8), 8),
+            cooperative ? divide_up(tokens, 16)
+                : divide_up(divide_up(tokens, 4), 8),
+            cooperative ? divide_up(tokens, 16)
+                : divide_up(divide_up(tokens, 8), 8),
             heads);
         struct SoftmaxParameters {
             std::uint32_t rows;
@@ -1351,22 +1589,65 @@ void VulkanOperators::conv2d(
     const bool use_tiled =
         tiled && kernel == 3 && stride == 1 && padding == 1 &&
         output_width == input_width && output_height == input_height;
-    const bool use_tiled16x8 =
-        use_tiled && !half_weight && !block8;
+    const char* disable_half_specialized =
+        std::getenv("DAV2_DISABLE_FP16_SPECIALIZED_CONV");
+    const bool allow_half_specialized =
+        disable_half_specialized == nullptr ||
+        disable_half_specialized[0] == '\0' ||
+        disable_half_specialized[0] == '0';
+    const bool specialized_weight = !half_weight || allow_half_specialized;
+    const bool use_tiled16x8 = use_tiled && !block8 && specialized_weight;
     const bool pointwise =
-        !half_weight && kernel == 1 && stride == 1 && padding == 0 &&
+        specialized_weight && kernel == 1 && stride == 1 && padding == 0 &&
         output_width == input_width && output_height == input_height;
+    const char* disable_pointwise_matrix2 =
+        std::getenv("DAV2_DISABLE_MATRIX2_POINTWISE_CONV");
+    const bool pointwise_matrix2 = pointwise && half_weight &&
+        context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
+        std::uint64_t(output_width) * output_height >= 128 &&
+        (disable_pointwise_matrix2 == nullptr ||
+         disable_pointwise_matrix2[0] == '\0' ||
+         disable_pointwise_matrix2[0] == '0');
     const bool stride2_tiled =
-        allow_stride2_tiled && !half_weight && kernel == 3 &&
+        specialized_weight && allow_stride2_tiled && kernel == 3 &&
         stride == 2 && padding == 1 && input_channels <= 384 &&
         output_channels <= 384;
+    if (pointwise_matrix2) {
+        const std::uint32_t rows = output_width * output_height;
+        VulkanBuffer& packed_input = fp16_workspace_.ensure(
+            std::uint64_t(rows) * input_channels * sizeof(std::uint16_t),
+            [this](std::uint64_t bytes) {
+                return context_.create_device_buffer(bytes);
+            });
+        struct PackParameters { std::uint32_t count; } pack_parameters{
+            rows * input_channels};
+        context_.dispatch(
+            pack_fp16_, {&packed_input, &input},
+            &pack_parameters, sizeof(pack_parameters),
+            divide_up(pack_parameters.count, 256));
+        struct MatrixParameters {
+            std::uint32_t rows;
+            std::uint32_t input_columns;
+            std::uint32_t output_columns;
+        } matrix_parameters{rows, input_channels, output_channels};
+        context_.dispatch(
+            conv2d_pointwise_coop_workgroup_nv_fp16_,
+            {&output, &packed_input, &weight, &bias},
+            &matrix_parameters, sizeof(matrix_parameters),
+            divide_up(output_channels, 32), divide_up(rows, 32));
+        return;
+    }
     VulkanPipeline& pipeline =
         pointwise
-        ? conv2d_pointwise_gemm_
+        ? (half_weight
+            ? conv2d_pointwise_gemm_half_
+            : conv2d_pointwise_gemm_)
         : stride2_tiled
-        ? conv2d_stride2_tiled8x8_
+        ? (half_weight
+            ? conv2d_stride2_tiled8x8_half_
+            : conv2d_stride2_tiled8x8_)
         : (use_tiled16x8
-        ? conv2d_tiled16x8_
+        ? (half_weight ? conv2d_tiled16x8_half_ : conv2d_tiled16x8_)
         : (use_tiled
         ? (half_weight
             ? (block8 ? conv2d8_tiled_half_ : conv2d_tiled_half_)

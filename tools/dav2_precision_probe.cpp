@@ -79,8 +79,9 @@ int main(int argc, char** argv) {
                 context, input.data(), width, height,
                 output.data(), output.size());
             if (status != DAV2_STATUS_OK) {
+                const std::string inference_error = dav2_last_error();
                 dav2_destroy(context);
-                throw std::runtime_error(dav2_last_error());
+                throw std::runtime_error(inference_error);
             }
             milliseconds.push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - start).count());

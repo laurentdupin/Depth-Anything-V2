@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -263,15 +264,34 @@ void DinoEncoder::linear(
     const GpuTensor& weight = weights_.tensor(weight_name);
     const VulkanBuffer& bias = buffer(weights_, bias_name);
     if (precision_ == inferbridge::native::Precision::fp16) {
+        const char* disable_prepack =
+            std::getenv("DAV2_DISABLE_MATRIX2_PREPACK");
+        const char* disable_fp32_input =
+            std::getenv("DAV2_DISABLE_MATRIX2_FP32_INPUT");
+        const bool transposed =
+            context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
+            weight.half_transposed_buffer.size() != 0 &&
+            (disable_prepack == nullptr || disable_prepack[0] == '\0' ||
+             disable_prepack[0] == '0') &&
+            (disable_fp32_input == nullptr || disable_fp32_input[0] == '\0' ||
+             disable_fp32_input[0] == '0');
         operators_.linear_fp16(
-            output, input, weight.half_buffer, bias,
-            rows, input_columns, output_columns, gelu);
+            output, input,
+            transposed ? weight.half_transposed_buffer : weight.half_buffer,
+            bias, rows, input_columns, output_columns, gelu, transposed);
         return;
     }
     if (precision_ == inferbridge::native::Precision::int8) {
+        const char* disabled = std::getenv("DAV2_DISABLE_MATRIX2_INT8");
+        const bool transposed =
+            context_.compute_capabilities().cooperative_matrix_workgroup_int8_nv &&
+            weight.int8_transposed_buffer.size() != 0 &&
+            (disabled == nullptr || disabled[0] == '\0' || disabled[0] == '0');
         operators_.linear_int8(
-            output, input, weight.int8_buffer, weight.int8_scales, bias,
-            rows, input_columns, output_columns, gelu);
+            output, input,
+            transposed ? weight.int8_transposed_buffer : weight.int8_buffer,
+            weight.int8_scales, bias, rows, input_columns, output_columns,
+            gelu, transposed);
         return;
     }
     operators_.linear(
@@ -313,10 +333,30 @@ EncoderOutput DinoEncoder::forward(
     const std::uint64_t token_elements =
         std::uint64_t(tokens) * embedding_;
     const VkDeviceSize token_bytes = token_elements * sizeof(float);
+    const char* disable_half_norm =
+        std::getenv("DAV2_DISABLE_FP16_LAYER_NORM_OUTPUT");
+    const bool half_normalized =
+        precision_ == inferbridge::native::Precision::fp16 &&
+        (disable_half_norm == nullptr || disable_half_norm[0] == '\0' ||
+         disable_half_norm[0] == '0');
+    const char* disable_matrix2_prepack =
+        std::getenv("DAV2_DISABLE_MATRIX2_PREPACK");
+    const bool matrix2_prepack =
+        precision_ == inferbridge::native::Precision::fp16 &&
+        context_.compute_capabilities().cooperative_matrix_workgroup_nv &&
+        (disable_matrix2_prepack == nullptr ||
+         disable_matrix2_prepack[0] == '\0' ||
+         disable_matrix2_prepack[0] == '0');
+    const auto half_linear_weight = [&](const GpuTensor& tensor)
+        -> const VulkanBuffer& {
+        return matrix2_prepack
+            ? tensor.half_transposed_buffer : tensor.half_buffer;
+    };
 
     VulkanBuffer current = context_.create_device_buffer(token_bytes);
     VulkanBuffer next = context_.create_device_buffer(token_bytes);
-    VulkanBuffer normalized = context_.create_device_buffer(token_bytes);
+    VulkanBuffer normalized = context_.create_device_buffer(
+        half_normalized ? token_bytes / 2 : token_bytes);
     VulkanBuffer query = context_.create_device_buffer(token_bytes);
     VulkanBuffer attention = context_.create_device_buffer(token_bytes);
     VulkanBuffer qkv =
@@ -383,19 +423,31 @@ EncoderOutput DinoEncoder::forward(
         for (std::uint32_t block = block_begin;
              block < block_end;
              ++block) {
-            operators_.layer_norm(
-                normalized,
-                current,
-                buffer(weights_, block_name(block, ".norm1.weight")),
-                buffer(weights_, block_name(block, ".norm1.bias")),
-                tokens,
-                embedding_,
-                1.0e-6f);
-            linear(
-                qkv, normalized,
-                block_name(block, ".attn.qkv.weight"),
-                block_name(block, ".attn.qkv.bias"),
-                tokens, embedding_, embedding_ * 3, false);
+            if (half_normalized) {
+                operators_.layer_norm_fp16(
+                    normalized, current,
+                    buffer(weights_, block_name(block, ".norm1.weight")),
+                    buffer(weights_, block_name(block, ".norm1.bias")),
+                    tokens, embedding_, 1.0e-6f);
+                const GpuTensor& qkv_weight = weights_.tensor(
+                    block_name(block, ".attn.qkv.weight"));
+                operators_.linear_fp16_half_input(
+                    qkv, normalized, half_linear_weight(qkv_weight),
+                    buffer(weights_, block_name(block, ".attn.qkv.bias")),
+                    tokens, embedding_, embedding_ * 3,
+                    matrix2_prepack);
+            } else {
+                operators_.layer_norm(
+                    normalized, current,
+                    buffer(weights_, block_name(block, ".norm1.weight")),
+                    buffer(weights_, block_name(block, ".norm1.bias")),
+                    tokens, embedding_, 1.0e-6f);
+                linear(
+                    qkv, normalized,
+                    block_name(block, ".attn.qkv.weight"),
+                    block_name(block, ".attn.qkv.bias"),
+                    tokens, embedding_, embedding_ * 3, false);
+            }
             operators_.attention_head64(
                 attention,
                 qkv,
@@ -435,24 +487,38 @@ EncoderOutput DinoEncoder::forward(
             }
             std::swap(current, next);
 
-            operators_.layer_norm(
-                normalized,
-                current,
-                buffer(weights_, block_name(block, ".norm2.weight")),
-                buffer(weights_, block_name(block, ".norm2.bias")),
-                tokens,
-                embedding_,
-                1.0e-6f);
+            if (half_normalized) {
+                operators_.layer_norm_fp16(
+                    normalized, current,
+                    buffer(weights_, block_name(block, ".norm2.weight")),
+                    buffer(weights_, block_name(block, ".norm2.bias")),
+                    tokens, embedding_, 1.0e-6f);
+            } else {
+                operators_.layer_norm(
+                    normalized, current,
+                    buffer(weights_, block_name(block, ".norm2.weight")),
+                    buffer(weights_, block_name(block, ".norm2.bias")),
+                    tokens, embedding_, 1.0e-6f);
+            }
             const std::string fc1_weight_name =
                 block_name(block, ".mlp.fc1.weight");
             const std::string fc1_bias_name =
                 block_name(block, ".mlp.fc1.bias");
             if (precision_ == inferbridge::native::Precision::fp16) {
                 const GpuTensor& fc1_weight = weights_.tensor(fc1_weight_name);
-                operators_.linear_fp16_half_output_gelu(
-                    hidden, normalized, fc1_weight.half_buffer,
-                    buffer(weights_, fc1_bias_name),
-                    tokens, embedding_, embedding_ * 4);
+                if (half_normalized) {
+                    operators_.linear_fp16_half_input_output_gelu(
+                        hidden, normalized, half_linear_weight(fc1_weight),
+                        buffer(weights_, fc1_bias_name),
+                        tokens, embedding_, embedding_ * 4,
+                        matrix2_prepack);
+                } else {
+                    operators_.linear_fp16_half_output_gelu(
+                        hidden, normalized, half_linear_weight(fc1_weight),
+                        buffer(weights_, fc1_bias_name),
+                        tokens, embedding_, embedding_ * 4,
+                        matrix2_prepack);
+                }
             } else {
                 linear(
                     hidden, normalized, fc1_weight_name, fc1_bias_name,
@@ -463,9 +529,10 @@ EncoderOutput DinoEncoder::forward(
                     block_name(block, ".mlp.fc2.weight");
                 const GpuTensor& fc2_weight = weights_.tensor(fc2_weight_name);
                 operators_.linear_fp16_half_input(
-                    query, hidden, fc2_weight.half_buffer,
+                    query, hidden, half_linear_weight(fc2_weight),
                     buffer(weights_, block_name(block, ".mlp.fc2.bias")),
-                    tokens, embedding_ * 4, embedding_);
+                    tokens, embedding_ * 4, embedding_,
+                    matrix2_prepack);
                 operators_.add_scaled(
                     next, current, query,
                     buffer(weights_, block_name(block, ".ls2.gamma")),

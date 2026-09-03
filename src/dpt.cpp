@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
@@ -214,7 +216,7 @@ void DptHead::select_convolution_block(
     const VulkanBuffer& refinement_bias = weight(
         weights_,
         "depth_head.scratch.refinenet1.resConfUnit2.conv1.bias");
-    const auto run_tiled = [&](bool tiled) {
+    const auto run_convolution_mix = [&](bool block8, bool tiled) {
         const auto start = std::chrono::steady_clock::now();
         context_.batch([&] {
             // Approximate the complete DPT 3x3 mix. The refinement units
@@ -245,7 +247,7 @@ void DptHead::select_convolution_block(
                         1,
                         1,
                         true,
-                        convolution_block8_,
+                        block8,
                         convolution_half_weight_,
                         tiled);
                 }
@@ -265,32 +267,115 @@ void DptHead::select_convolution_block(
                 1,
                 1,
                 true,
-                convolution_block8_,
+                block8,
                 convolution_half_weight_,
                 tiled);
         });
         return std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - start).count();
     };
-    std::array<double, 3> direct_samples{};
-    std::array<double, 3> tiled_samples{};
-    run_tiled(false);
-    run_tiled(true);
-    for (std::size_t sample = 0; sample < direct_samples.size(); ++sample) {
+    struct ConvolutionCandidate {
+        bool block8;
+        bool tiled;
+        std::array<double, 3> samples{};
+    };
+    std::array<ConvolutionCandidate, 4> convolution_candidates{{
+        {false, false, {}},
+        {true, false, {}},
+        {false, true, {}},
+        {true, true, {}},
+    }};
+    for (const ConvolutionCandidate& candidate : convolution_candidates)
+        run_convolution_mix(candidate.block8, candidate.tiled);
+    for (std::size_t sample = 0;
+         sample < convolution_candidates[0].samples.size(); ++sample) {
         if ((sample & 1u) == 0) {
-            direct_samples[sample] = run_tiled(false);
-            tiled_samples[sample] = run_tiled(true);
+            for (ConvolutionCandidate& candidate : convolution_candidates) {
+                candidate.samples[sample] = run_convolution_mix(
+                    candidate.block8, candidate.tiled);
+            }
         } else {
-            tiled_samples[sample] = run_tiled(true);
-            direct_samples[sample] = run_tiled(false);
+            for (auto candidate = convolution_candidates.rbegin();
+                 candidate != convolution_candidates.rend(); ++candidate) {
+                candidate->samples[sample] = run_convolution_mix(
+                    candidate->block8, candidate->tiled);
+            }
         }
     }
-    std::sort(direct_samples.begin(), direct_samples.end());
-    std::sort(tiled_samples.begin(), tiled_samples.end());
-    convolution_tiled_ =
-        tiled_samples[1] < direct_samples[1] * 0.95;
-    if (!convolution_half_weight_ &&
-        project_channels_[3] <= 384) {
+    ConvolutionCandidate* best_convolution = nullptr;
+    double best_convolution_time = 0.0;
+    for (ConvolutionCandidate& candidate : convolution_candidates) {
+        std::sort(candidate.samples.begin(), candidate.samples.end());
+        const double median = candidate.samples[1];
+        if (best_convolution == nullptr || median < best_convolution_time) {
+            best_convolution = &candidate;
+            best_convolution_time = median;
+        }
+    }
+    convolution_block8_ = best_convolution->block8;
+    convolution_tiled_ = best_convolution->tiled;
+    if (refinement_precision_ == inferbridge::native::Precision::fp16) {
+        const auto run_native_mix = [&] {
+            const auto start = std::chrono::steady_clock::now();
+            context_.batch([&] {
+                constexpr std::array<std::uint32_t, 4> scale = {1, 1, 2, 4};
+                constexpr std::array<std::uint32_t, 4> repetitions = {4, 6, 6, 4};
+                for (std::size_t level = 0; level < scale.size(); ++level) {
+                    const std::uint32_t width =
+                        std::max(1u, patch_width * scale[level] / 2);
+                    const std::uint32_t height =
+                        std::max(1u, patch_height * scale[level] / 2);
+                    for (std::uint32_t repetition = 0;
+                         repetition < repetitions[level]; ++repetition) {
+                        operators_.conv2d_fp16(
+                            refinement_output, refinement_input,
+                            refinement_weight.half_buffer, refinement_bias,
+                            width, height, features_, features_, 3, 1, 1,
+                            true);
+                    }
+                }
+                operators_.conv2d_fp16(
+                    full_output, full_input, output_weight.half_buffer,
+                    output_bias, full_width, full_height, features_ / 2, 32,
+                    3, 1, 1, true);
+            });
+            return std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - start).count();
+        };
+        std::array<double, 3> selected_mix_samples{};
+        std::array<double, 3> native_mix_samples{};
+        run_convolution_mix(convolution_block8_, convolution_tiled_);
+        run_native_mix();
+        for (std::size_t sample = 0;
+             sample < selected_mix_samples.size(); ++sample) {
+            if ((sample & 1u) == 0) {
+                selected_mix_samples[sample] =
+                    run_convolution_mix(
+                        convolution_block8_, convolution_tiled_);
+                native_mix_samples[sample] = run_native_mix();
+            } else {
+                native_mix_samples[sample] = run_native_mix();
+                selected_mix_samples[sample] =
+                    run_convolution_mix(
+                        convolution_block8_, convolution_tiled_);
+            }
+        }
+        std::sort(
+            selected_mix_samples.begin(), selected_mix_samples.end());
+        std::sort(native_mix_samples.begin(), native_mix_samples.end());
+        convolution_native_fp16_ =
+            native_mix_samples[1] < selected_mix_samples[1] * 0.985;
+        if (std::getenv("DAV2_PRINT_CONVOLUTION_TUNING")) {
+            std::fprintf(
+                stderr,
+                "DAV2_CONV_TUNING:selected_us=%.3f native_us=%.3f native=%d tiled=%d block8=%d\n",
+                selected_mix_samples[1], native_mix_samples[1],
+                convolution_native_fp16_ ? 1 : 0,
+                convolution_tiled_ ? 1 : 0,
+                convolution_block8_ ? 1 : 0);
+        }
+    }
+    if (project_channels_[3] <= 384) {
         const std::uint32_t stride_input_width =
             std::max(1u, patch_width);
         const std::uint32_t stride_input_height =
@@ -322,7 +407,9 @@ void DptHead::select_convolution_block(
                     operators_.conv2d(
                         stride_output,
                         stride_input,
-                        stride_weight.buffer,
+                        convolution_half_weight_
+                            ? stride_weight.half_buffer
+                            : stride_weight.buffer,
                         stride_bias,
                         stride_input_width,
                         stride_input_height,
@@ -333,7 +420,7 @@ void DptHead::select_convolution_block(
                         1,
                         true,
                         convolution_block8_,
-                        false,
+                        convolution_half_weight_,
                         convolution_tiled_,
                         use_specialized);
                 }
@@ -365,6 +452,15 @@ void DptHead::select_convolution_block(
         stride2_tiled_ =
             tiled_stride_samples[1] < generic_stride_samples[1] * 0.985;
     }
+    // Diagnostic overrides make convolution routing reproducible when
+    // comparing kernels on a particular adapter. They are intentionally
+    // absent from normal execution, which continues to use autotuning.
+    if (const char* value = std::getenv("DAV2_CONV_BLOCK8"))
+        convolution_block8_ = value[0] != '0';
+    if (const char* value = std::getenv("DAV2_CONV_TILED"))
+        convolution_tiled_ = value[0] != '0';
+    if (const char* value = std::getenv("DAV2_CONV_STRIDE2_TILED"))
+        stride2_tiled_ = value[0] != '0';
     weights_.retain_dpt_precision(
         precision_, convolution_half_weight_
             ? inferbridge::native::Precision::fp16
@@ -419,7 +515,8 @@ FeatureMap DptHead::conv(
                 output.buffer, input.buffer, convolution_weight.half_buffer,
                 bias, input.width, input.height, input.channels,
                 output_channels, kernel, stride, padding, has_bias,
-                convolution_block8_, true, convolution_tiled_, false);
+                convolution_block8_, true, convolution_tiled_,
+                stride2_tiled_);
         }
     } else if (operation_precision == inferbridge::native::Precision::int8) {
         operators_.conv2d_int8(

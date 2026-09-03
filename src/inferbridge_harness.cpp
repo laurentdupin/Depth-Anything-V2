@@ -92,6 +92,12 @@ struct ibrh_job {
 
 namespace {
 
+#if defined(_WIN32)
+constexpr uint32_t kMaximumGpuAdmissions = 5u;
+#else
+constexpr uint32_t kMaximumGpuAdmissions = 3u;
+#endif
+
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.depth-anything-v2.native";
 constexpr char kHarnessVersion[] = "1.3.0";
@@ -435,7 +441,7 @@ ibrh_result IBRH_CALL query_capabilities(
         1ull << IBRH_RESOURCE_DOMAIN_D3D12;
     capabilities->synchronization_mask =
         1ull << IBRH_SYNC_D3D12_FENCE;
-    capabilities->maximum_in_flight_jobs = 3u;
+    capabilities->maximum_in_flight_jobs = kMaximumGpuAdmissions;
 #elif defined(__APPLE__)
     capabilities->flags |=
         IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION |
@@ -775,10 +781,10 @@ ibrh_result IBRH_CALL submit(
         if (!valid_metal) return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
 #endif
         uint32_t admitted = model->gpu_admissions->load();
-        while (admitted < 3u &&
+        while (admitted < kMaximumGpuAdmissions &&
                !model->gpu_admissions->compare_exchange_weak(
                    admitted, admitted + 1u)) {}
-        if (admitted >= 3u) {
+        if (admitted >= kMaximumGpuAdmissions) {
             return fail(
                 model->runtime, IBRH_ERROR_INVALID_STATE,
                 "all DAV2 GPU job admissions are occupied");
@@ -1021,10 +1027,18 @@ ibrh_result IBRH_CALL job_poll(
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
-    job->cancel_requested.store(true);
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job))
         return IBRH_OK;
+
+    // GPU command recording/submission has already started. There are no
+    // dispatch-boundary cancellation points in the DAV2 graph, so marking the
+    // job cancelled here would only hide output while the same GPU work keeps
+    // running. In particular, it would make a latest-frame scheduler believe
+    // it had reclaimed capacity when it had not. Queue removal above is atomic;
+    // once it loses that race, report the job as non-cancellable and let it
+    // complete normally.
+    return IBRH_ERROR_INVALID_STATE;
 #endif
     dav2_gpu_job* gpu_job = nullptr;
     {

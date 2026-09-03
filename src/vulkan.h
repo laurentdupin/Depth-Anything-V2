@@ -68,6 +68,17 @@ struct VulkanComputeCapabilities {
     // True only for accelerated signed packed 4x8 integer dot products.  A
     // software emulation is deliberately not advertised as INT8 support.
     bool packed_int8_dot = false;
+    // A 16x16x16 subgroup cooperative matrix with FP16 inputs and FP32
+    // accumulation is available and enabled on the logical device.
+    bool cooperative_matrix_fp16 = false;
+    // NVIDIA workgroup-scope matrices with flexible dimensions and tensor
+    // addressing, used by the compiler-managed GEMM fast path.
+    bool cooperative_matrix_workgroup_nv = false;
+    // Native signed INT8 workgroup GEMM with INT32 accumulation.
+    bool cooperative_matrix_workgroup_int8_nv = false;
+    // Matrix2 conversions and per-element operations needed for fused GELU
+    // and FP16-output epilogues.
+    bool cooperative_matrix_workgroup_epilogue_nv = false;
 };
 
 class VulkanSemaphore {
@@ -402,7 +413,9 @@ private:
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkQueryPool profile_query_pool_ = VK_NULL_HANDLE;
     bool profile_dispatches_ = false;
+    bool profile_dispatch_ranges_ = true;
     float timestamp_period_ns_ = 0.0f;
+    VkDeviceSize max_uniform_buffer_range_ = 0;
     std::unordered_map<std::string, ProfileStat> profile_stats_;
     VkCommandBuffer batch_command_ = VK_NULL_HANDLE;
     bool batch_has_dispatch_ = false;

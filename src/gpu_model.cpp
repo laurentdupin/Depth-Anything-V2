@@ -149,6 +149,8 @@ GpuModel::GpuModel(
             {},
             {},
             {},
+            {},
+            {},
             source.dimensions,
             source.rank,
             source.elements,
@@ -176,6 +178,31 @@ GpuModel::GpuModel(
                 destination.half_buffer,
                 packed.data(),
                 packed.size() * sizeof(std::uint32_t));
+            if (source.rank == 2 &&
+                name.rfind("pretrained.blocks.", 0) == 0) {
+                const std::size_t output_columns =
+                    static_cast<std::size_t>(source.dimensions[0]);
+                const std::size_t input_columns =
+                    static_cast<std::size_t>(source.dimensions[1]);
+                std::vector<std::uint16_t> transposed(
+                    static_cast<std::size_t>(source.elements));
+                for (std::size_t output = 0;
+                     output < output_columns; ++output) {
+                    for (std::size_t input = 0;
+                         input < input_columns; ++input) {
+                        transposed[input * output_columns + output] =
+                            float_to_half(
+                                floats[output * input_columns + input]);
+                    }
+                }
+                destination.half_transposed_buffer =
+                    context.create_device_buffer(
+                        transposed.size() * sizeof(std::uint16_t));
+                context.upload(
+                    destination.half_transposed_buffer,
+                    transposed.data(),
+                    transposed.size() * sizeof(std::uint16_t));
+            }
         }
         if (precision == inferbridge::native::Precision::int8 &&
             use_int8_weight(name, source)) {
@@ -192,6 +219,10 @@ GpuModel::GpuModel(
             std::vector<float> scales(output_rows, 1.0e-8f);
             std::vector<std::uint32_t> packed(
                 output_rows * (input_columns / 4), 0u);
+            const bool make_transposed = source.rank == 2 &&
+                name.rfind("pretrained.blocks.", 0) == 0;
+            std::vector<std::int8_t> transposed_int8(
+                make_transposed ? source.elements : 0);
             const auto source_value = [&](std::size_t output,
                                           std::size_t input) {
                 if (!transposed) {
@@ -223,6 +254,10 @@ GpuModel::GpuModel(
                             std::max(-127.0f, std::min(127.0f, normalized))));
                         word |= (static_cast<std::uint32_t>(quantized) & 0xffu)
                             << (lane * 8u);
+                        if (make_transposed) {
+                            transposed_int8[(input + lane) * output_rows + output] =
+                                static_cast<std::int8_t>(quantized);
+                        }
                     }
                     packed[output * (input_columns / 4) + input / 4] = word;
                 }
@@ -235,6 +270,13 @@ GpuModel::GpuModel(
                 destination.int8_buffer,
                 packed.data(),
                 packed.size() * sizeof(std::uint32_t));
+            if (make_transposed) {
+                destination.int8_transposed_buffer =
+                    context.create_device_buffer(transposed_int8.size());
+                context.upload(
+                    destination.int8_transposed_buffer,
+                    transposed_int8.data(), transposed_int8.size());
+            }
             context.upload(
                 destination.int8_scales,
                 scales.data(),
@@ -274,9 +316,11 @@ void GpuModel::retain_transformer_precision(
         }
         if (precision != inferbridge::native::Precision::fp16) {
             context_.discard(tensor.half_buffer);
+            context_.discard(tensor.half_transposed_buffer);
         }
         if (precision != inferbridge::native::Precision::int8) {
             context_.discard(tensor.int8_buffer);
+            context_.discard(tensor.int8_transposed_buffer);
             context_.discard(tensor.int8_scales);
         }
     }
@@ -305,6 +349,7 @@ void GpuModel::retain_dpt_precision(
         }
         if (precision != inferbridge::native::Precision::int8) {
             context_.discard(tensor.int8_buffer);
+            context_.discard(tensor.int8_transposed_buffer);
             context_.discard(tensor.int8_scales);
         }
     }

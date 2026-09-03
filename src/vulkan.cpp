@@ -226,8 +226,30 @@ VulkanContext::VulkanContext(
         "vkEnumeratePhysicalDevices");
     physical_device_ = devices[device_index];
 
-    VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(physical_device_, &properties);
+    std::uint32_t extension_count = 0;
+    check(
+        vkEnumerateDeviceExtensionProperties(
+            physical_device_, nullptr, &extension_count, nullptr),
+        "vkEnumerateDeviceExtensionProperties");
+    std::vector<VkExtensionProperties> extensions(extension_count);
+    check(
+        vkEnumerateDeviceExtensionProperties(
+            physical_device_, nullptr, &extension_count, extensions.data()),
+        "vkEnumerateDeviceExtensionProperties");
+    const bool has_cooperative_matrix = has_extension(
+        extensions, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    const bool has_cooperative_matrix2 = has_extension(
+        extensions, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
+
+    VkPhysicalDeviceSubgroupProperties subgroup_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 base_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &subgroup_properties,
+    };
+    vkGetPhysicalDeviceProperties2(physical_device_, &base_properties);
+    const VkPhysicalDeviceProperties& properties = base_properties.properties;
     device_name_ = properties.deviceName;
     VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
@@ -236,13 +258,37 @@ VulkanContext::VulkanContext(
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
         &integer_dot_features,
     };
+    VkPhysicalDevice8BitStorageFeatures storage8_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+        &float16_int8_features,
+    };
     VkPhysicalDevice16BitStorageFeatures storage16_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
-        &float16_int8_features,
+        &storage8_features,
+    };
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        &storage16_features,
+    };
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV cooperative2_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV,
+        &cooperative_features,
+    };
+    VkPhysicalDeviceVulkanMemoryModelFeatures memory_model_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
+        has_cooperative_matrix2
+            ? static_cast<void*>(&cooperative2_features)
+            : has_cooperative_matrix
+            ? static_cast<void*>(&cooperative_features)
+            : static_cast<void*>(&storage16_features),
     };
     VkPhysicalDeviceFeatures2 device_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        &storage16_features,
+        has_cooperative_matrix2
+            ? static_cast<void*>(&memory_model_features)
+            : has_cooperative_matrix
+            ? static_cast<void*>(&cooperative_features)
+            : static_cast<void*>(&storage16_features),
     };
     vkGetPhysicalDeviceFeatures2(physical_device_, &device_features);
     compute_capabilities_.fp16 =
@@ -261,6 +307,159 @@ VulkanContext::VulkanContext(
         integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
         integer_dot_properties
             .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
+    if (has_cooperative_matrix &&
+        cooperative_features.cooperativeMatrix == VK_TRUE &&
+        subgroup_properties.subgroupSize == 32 &&
+        (subgroup_properties.supportedStages &
+         VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+        compute_capabilities_.fp16) {
+        const auto get_properties = reinterpret_cast<
+            PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+            vkGetInstanceProcAddr(
+                instance_,
+                "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+        if (get_properties != nullptr) {
+            std::uint32_t count = 0;
+            if (get_properties(physical_device_, &count, nullptr) ==
+                VK_SUCCESS) {
+                std::vector<VkCooperativeMatrixPropertiesKHR> matrices(
+                    count,
+                    {VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR});
+                if (get_properties(
+                        physical_device_, &count, matrices.data()) ==
+                    VK_SUCCESS) {
+                    compute_capabilities_.cooperative_matrix_fp16 =
+                        std::any_of(
+                            matrices.begin(), matrices.end(),
+                            [](const auto& matrix) {
+                                return matrix.MSize == 16 &&
+                                    matrix.NSize == 16 &&
+                                    matrix.KSize == 16 &&
+                                    matrix.AType ==
+                                        VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                    matrix.BType ==
+                                        VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                    matrix.CType ==
+                                        VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                                    matrix.ResultType ==
+                                        VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                                    matrix.scope ==
+                                        VK_SCOPE_SUBGROUP_KHR;
+                            });
+                }
+            }
+        }
+    }
+    if (has_cooperative_matrix2 &&
+        compute_capabilities_.cooperative_matrix_fp16 &&
+        cooperative2_features.cooperativeMatrixWorkgroupScope == VK_TRUE &&
+        cooperative2_features.cooperativeMatrixFlexibleDimensions == VK_TRUE &&
+        cooperative2_features.cooperativeMatrixTensorAddressing == VK_TRUE &&
+        memory_model_features.vulkanMemoryModel == VK_TRUE &&
+        memory_model_features.vulkanMemoryModelDeviceScope == VK_TRUE) {
+        const auto get_flexible_properties = reinterpret_cast<
+            PFN_vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV>(
+            vkGetInstanceProcAddr(
+                instance_,
+                "vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV"));
+        if (get_flexible_properties != nullptr) {
+            std::uint32_t count = 0;
+            if (get_flexible_properties(physical_device_, &count, nullptr) ==
+                VK_SUCCESS) {
+                std::vector<VkCooperativeMatrixFlexibleDimensionsPropertiesNV>
+                    matrices(
+                        count,
+                        {VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_FLEXIBLE_DIMENSIONS_PROPERTIES_NV});
+                if (get_flexible_properties(
+                        physical_device_, &count, matrices.data()) ==
+                    VK_SUCCESS) {
+                    compute_capabilities_.cooperative_matrix_workgroup_nv =
+                        std::any_of(
+                            matrices.begin(), matrices.end(),
+                            [](const auto& matrix) {
+                                return matrix.scope == VK_SCOPE_WORKGROUP_KHR &&
+                                    matrix.workgroupInvocations == 128 &&
+                                    matrix.MGranularity != 0 &&
+                                    32 % matrix.MGranularity == 0 &&
+                                    matrix.NGranularity != 0 &&
+                                    32 % matrix.NGranularity == 0 &&
+                                    matrix.KGranularity != 0 &&
+                                    16 % matrix.KGranularity == 0 &&
+                                    matrix.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                    matrix.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                    matrix.CType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                                    matrix.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR;
+                            });
+                    compute_capabilities_.cooperative_matrix_workgroup_int8_nv =
+                        storage8_features.storageBuffer8BitAccess == VK_TRUE &&
+                        float16_int8_features.shaderInt8 == VK_TRUE &&
+                        std::any_of(
+                            matrices.begin(), matrices.end(),
+                            [](const auto& matrix) {
+                                return matrix.scope == VK_SCOPE_WORKGROUP_KHR &&
+                                    matrix.workgroupInvocations == 128 &&
+                                    matrix.MGranularity != 0 &&
+                                    32 % matrix.MGranularity == 0 &&
+                                    matrix.NGranularity != 0 &&
+                                    32 % matrix.NGranularity == 0 &&
+                                    matrix.KGranularity != 0 &&
+                                    32 % matrix.KGranularity == 0 &&
+                                    matrix.AType == VK_COMPONENT_TYPE_SINT8_KHR &&
+                                    matrix.BType == VK_COMPONENT_TYPE_SINT8_KHR &&
+                                    matrix.CType == VK_COMPONENT_TYPE_SINT32_KHR &&
+                                    matrix.ResultType == VK_COMPONENT_TYPE_SINT32_KHR;
+                            });
+                    const bool has_fp16_accumulator = std::any_of(
+                        matrices.begin(), matrices.end(),
+                        [](const auto& matrix) {
+                            return matrix.scope == VK_SCOPE_WORKGROUP_KHR &&
+                                matrix.workgroupInvocations == 128 &&
+                                matrix.MGranularity != 0 &&
+                                32 % matrix.MGranularity == 0 &&
+                                matrix.NGranularity != 0 &&
+                                32 % matrix.NGranularity == 0 &&
+                                matrix.KGranularity != 0 &&
+                                16 % matrix.KGranularity == 0 &&
+                                matrix.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                matrix.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR;
+                        });
+                    compute_capabilities_
+                        .cooperative_matrix_workgroup_epilogue_nv =
+                            compute_capabilities_
+                                .cooperative_matrix_workgroup_nv &&
+                            has_fp16_accumulator &&
+                            cooperative2_features
+                                    .cooperativeMatrixConversions == VK_TRUE &&
+                            cooperative2_features
+                                    .cooperativeMatrixPerElementOperations ==
+                                VK_TRUE;
+                    compute_capabilities_.cooperative_matrix_workgroup_int8_nv =
+                        compute_capabilities_.cooperative_matrix_workgroup_int8_nv &&
+                        cooperative2_features.cooperativeMatrixConversions == VK_TRUE &&
+                        cooperative2_features.cooperativeMatrixPerElementOperations ==
+                            VK_TRUE;
+                }
+            }
+        }
+    }
+    if (const char* disabled =
+            std::getenv("DAV2_DISABLE_COOPERATIVE_MATRIX")) {
+        if (disabled[0] != '\0' && disabled[0] != '0') {
+            compute_capabilities_.cooperative_matrix_fp16 = false;
+            compute_capabilities_.cooperative_matrix_workgroup_nv = false;
+            compute_capabilities_.cooperative_matrix_workgroup_int8_nv = false;
+            compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv = false;
+        }
+    }
+    if (const char* disabled =
+            std::getenv("DAV2_DISABLE_COOPERATIVE_MATRIX2")) {
+        if (disabled[0] != '\0' && disabled[0] != '0') {
+            compute_capabilities_.cooperative_matrix_workgroup_nv = false;
+            compute_capabilities_.cooperative_matrix_workgroup_int8_nv = false;
+            compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv =
+                false;
+        }
+    }
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -279,17 +478,16 @@ VulkanContext::VulkanContext(
     vkGetPhysicalDeviceMemoryProperties(
         physical_device_, &memory_properties_);
 
-    std::uint32_t extension_count = 0;
-    check(
-        vkEnumerateDeviceExtensionProperties(
-            physical_device_, nullptr, &extension_count, nullptr),
-        "vkEnumerateDeviceExtensionProperties");
-    std::vector<VkExtensionProperties> extensions(extension_count);
-    check(
-        vkEnumerateDeviceExtensionProperties(
-            physical_device_, nullptr, &extension_count, extensions.data()),
-        "vkEnumerateDeviceExtensionProperties");
     std::vector<const char*> enabled_extensions;
+    if (compute_capabilities_.cooperative_matrix_fp16) {
+        enabled_extensions.push_back(
+            VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    }
+    if (compute_capabilities_.cooperative_matrix_workgroup_nv ||
+        compute_capabilities_.cooperative_matrix_workgroup_int8_nv) {
+        enabled_extensions.push_back(
+            VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
+    }
 #if defined(_WIN32)
     const bool has_external_memory_win32 = has_extension(
         extensions, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
@@ -422,11 +620,17 @@ VulkanContext::VulkanContext(
         profile_environment[0] != '\0' &&
         profile_environment[0] != '0' &&
         family->timestampValidBits != 0;
+    if (const char* batch_only =
+            std::getenv("DAV2_VULKAN_PROFILE_BATCH_ONLY")) {
+        profile_dispatch_ranges_ =
+            batch_only[0] == '\0' || batch_only[0] == '0';
+    }
     if (const char* skip =
             std::getenv("DAV2_VULKAN_PROFILE_SKIP_BATCHES")) {
         profile_skip_batches_ = std::strtoull(skip, nullptr, 10);
     }
     timestamp_period_ns_ = properties.limits.timestampPeriod;
+    max_uniform_buffer_range_ = properties.limits.maxUniformBufferRange;
 
     // Inference is throughput work. Keep room for latency-sensitive rendering
     // when this independent Vulkan device shares a physical Android GPU with
@@ -454,22 +658,68 @@ VulkanContext::VulkanContext(
         compute_capabilities_.packed_int8_dot
             ? &enabled_integer_dot : nullptr,
         compute_capabilities_.fp16 ? VK_TRUE : VK_FALSE,
+        compute_capabilities_.cooperative_matrix_workgroup_int8_nv
+            ? VK_TRUE : VK_FALSE,
+    };
+    VkPhysicalDevice8BitStorageFeatures enabled_storage8{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+        &enabled_float16_int8,
+        compute_capabilities_.cooperative_matrix_workgroup_int8_nv
+            ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
         VK_FALSE,
     };
     VkPhysicalDevice16BitStorageFeatures enabled_storage16{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
         (compute_capabilities_.fp16 ||
-         compute_capabilities_.packed_int8_dot)
-            ? &enabled_float16_int8 : nullptr,
+         compute_capabilities_.packed_int8_dot ||
+         compute_capabilities_.cooperative_matrix_workgroup_int8_nv)
+            ? &enabled_storage8 : nullptr,
         compute_capabilities_.fp16 ? VK_TRUE : VK_FALSE,
         VK_FALSE,
         VK_FALSE,
         VK_FALSE,
     };
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR enabled_cooperative{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        (compute_capabilities_.fp16 ||
+         compute_capabilities_.cooperative_matrix_workgroup_int8_nv)
+            ? static_cast<void*>(&enabled_storage16)
+            : compute_capabilities_.packed_int8_dot
+            ? static_cast<void*>(&enabled_float16_int8)
+            : nullptr,
+        compute_capabilities_.cooperative_matrix_fp16 ? VK_TRUE : VK_FALSE,
+        VK_FALSE,
+    };
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV enabled_cooperative2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV,
+        &enabled_cooperative,
+        VK_TRUE,
+        VK_TRUE,
+        VK_FALSE,
+        compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv
+            ? VK_TRUE : VK_FALSE,
+        compute_capabilities_.cooperative_matrix_workgroup_epilogue_nv
+            ? VK_TRUE : VK_FALSE,
+        VK_TRUE,
+        VK_FALSE,
+    };
+    VkPhysicalDeviceVulkanMemoryModelFeatures enabled_memory_model{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
+        &enabled_cooperative2,
+        VK_TRUE,
+        VK_TRUE,
+        VK_FALSE,
+    };
     const void* enabled_feature_chain = compute_capabilities_.fp16
-        ? static_cast<const void*>(&enabled_storage16)
-        : compute_capabilities_.packed_int8_dot
-        ? static_cast<const void*>(&enabled_float16_int8)
+        ? (compute_capabilities_.cooperative_matrix_workgroup_nv
+            ? static_cast<const void*>(&enabled_memory_model)
+            : compute_capabilities_.cooperative_matrix_fp16
+            ? static_cast<const void*>(&enabled_cooperative)
+            : static_cast<const void*>(&enabled_storage16))
+        : (compute_capabilities_.packed_int8_dot ||
+           compute_capabilities_.cooperative_matrix_workgroup_int8_nv)
+        ? static_cast<const void*>(&enabled_storage8)
         : nullptr;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -1839,13 +2089,18 @@ void VulkanContext::dispatch_resources(
     std::uint32_t group_y,
     std::uint32_t group_z,
     const VulkanSemaphore* wait) {
-    if (pipeline.owner_ != this ||
-        resources.size() != pipeline.descriptor_types_.size() ||
-        push_constant_bytes != pipeline.push_constant_bytes_ ||
-        (push_constant_bytes && push_constants == nullptr) ||
-        group_x == 0 || group_y == 0 || group_z == 0) {
-        throw std::invalid_argument("invalid Vulkan dispatch");
-    }
+    if (pipeline.owner_ != this)
+        throw std::invalid_argument(
+            "Vulkan dispatch uses a foreign pipeline: " +
+            pipeline.debug_name_);
+    if (resources.size() != pipeline.descriptor_types_.size())
+        throw std::invalid_argument("Vulkan dispatch descriptor count mismatch");
+    if (push_constant_bytes != pipeline.push_constant_bytes_)
+        throw std::invalid_argument("Vulkan dispatch push constant size mismatch");
+    if (push_constant_bytes && push_constants == nullptr)
+        throw std::invalid_argument("Vulkan dispatch has null push constants");
+    if (group_x == 0 || group_y == 0 || group_z == 0)
+        throw std::invalid_argument("Vulkan dispatch has an empty workgroup dimension");
 
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
     if (!pipeline.cached_descriptor_sets_.empty()) {
@@ -1916,7 +2171,10 @@ void VulkanContext::dispatch_resources(
         buffer_info[index] = {
             buffer->buffer_,
             0,
-            buffer->size_,
+            type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                    type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                ? std::min(buffer->size_, max_uniform_buffer_range_)
+                : buffer->size_,
         };
         writes[index] = {
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1951,6 +2209,7 @@ void VulkanContext::dispatch_resources(
     std::uint32_t batch_profile_begin = 0;
     std::uint32_t batch_profile_end = 0;
     const bool profile_batch = batched &&
+        profile_dispatch_ranges_ &&
         batch_profile_query_pool_ != VK_NULL_HANDLE &&
         batch_profile_query_count_ + 2u <= 8192u;
     if (profile_batch) {

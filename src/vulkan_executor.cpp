@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -513,6 +514,20 @@ inferbridge::native::Precision execution_precision(
         Precision::fp32);
 }
 
+bool track_resource_hazards(dav2_encoder encoder) {
+#if defined(_WIN32)
+    const char* enabled =
+        std::getenv("DAV2_ENABLE_RESOURCE_HAZARD_TRACKING");
+    return enabled != nullptr && enabled[0] != '\0' && enabled[0] != '0';
+#else
+    const char* disabled =
+        std::getenv("DAV2_DISABLE_RESOURCE_HAZARD_TRACKING");
+    const bool explicitly_disabled = disabled != nullptr &&
+        disabled[0] != '\0' && disabled[0] != '0';
+    return encoder != DAV2_ENCODER_VITL && !explicitly_disabled;
+#endif
+}
+
 class VulkanExecutor final : public Executor {
 public:
     VulkanExecutor(
@@ -523,7 +538,7 @@ public:
         : model_(model_path, encoder),
           context_(
               static_cast<std::uint32_t>(vulkan_device_index),
-              encoder != DAV2_ENCODER_VITL),
+              track_resource_hazards(encoder)),
           precision_(execution_precision(context_, flags)),
           weights_(model_, context_, precision_),
           operators_(context_),
@@ -666,6 +681,16 @@ public:
                 static_cast<int>(request.width),
                 static_cast<int>(request.height),
                 request.input_size);
+            // Kernel selection performs synchronous GPU timing. Do it before
+            // opening the asynchronous interop batch; otherwise nested batch
+            // calls only record commands and the tuner measures CPU recording
+            // time instead of GPU execution time.
+            encoder_.prepare(
+                static_cast<std::uint32_t>(shape.width),
+                static_cast<std::uint32_t>(shape.height));
+            dpt_.prepare(
+                static_cast<std::uint32_t>(shape.width / 14),
+                static_cast<std::uint32_t>(shape.height / 14));
             VulkanBuffer output = prepare_buffer_output(
                 *slot,
                 d3d12_device_.Get(),
@@ -816,6 +841,14 @@ public:
                 static_cast<int>(request.width),
                 static_cast<int>(request.height),
                 request.input_size);
+            // Run synchronous kernel selection outside the asynchronous
+            // interop batch so its timings reflect completed GPU work.
+            encoder_.prepare(
+                static_cast<std::uint32_t>(shape.width),
+                static_cast<std::uint32_t>(shape.height));
+            dpt_.prepare(
+                static_cast<std::uint32_t>(shape.width / 14),
+                static_cast<std::uint32_t>(shape.height / 14));
             VulkanImage transient_output;
             VulkanImage* output = nullptr;
             if (external_output) {
