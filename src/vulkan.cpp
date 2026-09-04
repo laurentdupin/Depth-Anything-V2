@@ -19,7 +19,6 @@ void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
 }
 
-#if defined(_WIN32)
 bool has_extension(
     const std::vector<VkExtensionProperties>& extensions,
     const char* name) {
@@ -30,7 +29,6 @@ bool has_extension(
             return std::strcmp(extension.extensionName, name) == 0;
         });
 }
-#endif
 
 }  // namespace
 
