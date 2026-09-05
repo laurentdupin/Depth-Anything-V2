@@ -802,3 +802,5 @@ dav2_status DAV2_CALL dav2_inferbridge_bgra8_f32(
 }
 
 }  // extern "C"
+
+#include "linux_capture.inl"

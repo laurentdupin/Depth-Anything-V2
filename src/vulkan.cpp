@@ -1,4 +1,8 @@
 #include "vulkan.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <inferbridge/linux_capture_vulkan.h>
+#include <linux_capture_preprocess_spv.h>
+#endif
 
 #include "inferbridge/native_harness_cooperative_matrix.h"
 
@@ -494,6 +498,10 @@ VulkanContext::VulkanContext(
         physical_device_, &memory_properties_);
 
     std::vector<const char*> enabled_extensions;
+#if defined(__linux__) && !defined(__ANDROID__)
+    linux_dma_buf_enabled_ = inferbridge::linux_capture::enable_extensions(
+        extensions, enabled_extensions);
+#endif
     if (compute_capabilities_.cooperative_matrix_fp16) {
         enabled_extensions.push_back(
             VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
@@ -832,6 +840,11 @@ VulkanContext::~VulkanContext() {
 
 void VulkanContext::release() noexcept {
     if (device_) {
+#if defined(__linux__) && !defined(__ANDROID__)
+        vkDeviceWaitIdle(device_);
+        linux_capture_images_.clear();
+        linux_capture_pipeline_.reset();
+#endif
         vkDeviceWaitIdle(device_);
         print_profile();
         cancel_batch();
@@ -1794,6 +1807,9 @@ void VulkanContext::release_external_buffer(
         nullptr);
 }
 
+#include <inferbridge/linux_capture_vulkan_context.inl>
+
+
 void VulkanContext::acquire_external_image(
     const VulkanImage& image,
     VkImageLayout layout,
@@ -1811,7 +1827,11 @@ void VulkanContext::acquire_external_image(
         destination_access,
         VK_IMAGE_LAYOUT_GENERAL,
         layout,
+#if defined(__linux__) && !defined(__ANDROID__)
+        VK_QUEUE_FAMILY_FOREIGN_EXT,
+#else
         VK_QUEUE_FAMILY_EXTERNAL,
+#endif
         queue_family_,
         image.image_,
         {
@@ -1853,7 +1873,11 @@ void VulkanContext::release_external_image(
         layout,
         VK_IMAGE_LAYOUT_GENERAL,
         queue_family_,
+#if defined(__linux__) && !defined(__ANDROID__)
+        VK_QUEUE_FAMILY_FOREIGN_EXT,
+#else
         VK_QUEUE_FAMILY_EXTERNAL,
+#endif
         image.image_,
         {
             VK_IMAGE_ASPECT_COLOR_BIT,
