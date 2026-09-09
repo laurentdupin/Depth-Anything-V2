@@ -1134,7 +1134,7 @@ extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     result.model_prepare = model_prepare;
     std::memcpy(api, &result, std::min(api_size, sizeof(result)));
 #if defined(__linux__) && !defined(__ANDROID__)
-    inferbridge::linux_capture::HarnessAdapter<LinuxCaptureHooks>::install(api);
+    inferbridge::linux_capture::HarnessAdapter<LinuxCaptureHooks, true>::install(api);
 #endif
     return IBRH_OK;
 }
