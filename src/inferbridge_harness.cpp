@@ -1,3 +1,4 @@
+#include <inferbridge/native_harness_json.h>
 #include "inferbridge_harness.h"
 
 #include "depth_anything_v2.h"
@@ -53,6 +54,7 @@ struct ibrh_model {
 };
 
 struct ibrh_job {
+    uint32_t output_width = 0u, output_height = 0u;
     std::atomic<uint32_t> references{1u};
     mutable std::mutex gpu_mutex;
     dav2_gpu_job* gpu_job = nullptr;
@@ -115,17 +117,7 @@ bool valid_string(ibrh_string_view value) {
 
 bool json_string(
     const std::string& json, const std::string& key, std::string& value) {
-    const std::string marker = "\"" + key + "\"";
-    size_t position = json.find(marker);
-    if (position == std::string::npos) return false;
-    position = json.find(':', position + marker.size());
-    if (position == std::string::npos) return false;
-    position = json.find_first_not_of(" \t\r\n", position + 1u);
-    if (position == std::string::npos || json[position] != '"') return false;
-    const size_t end = json.find('"', position + 1u);
-    if (end == std::string::npos) return false;
-    value = json.substr(position + 1u, end - position - 1u);
-    return true;
+    return inferbridge::harness_json::string_member(json, key, value);
 }
 
 bool json_uint(
@@ -362,7 +354,7 @@ private:
                 job->input_texture_handle, job->width, job->height,
                 job->input_pixel_format, job->input_size,
                 job->input_fence_handle, job->input_fence_value,
-                job->output_texture_handle, job->width, job->height,
+                job->output_texture_handle, job->output_width, job->output_height,
                 job->output_fence_handle, job->output_fence_value,
                 job->source_frame_id, job->timestamp_ns,
                 job->input_texture_identity, job->output_texture_identity};
@@ -374,7 +366,7 @@ private:
                 job->input_texture_handle, job->width, job->height,
                 job->input_pixel_format, job->input_size,
                 job->input_fence_handle, job->input_fence_value,
-                job->output_texture_handle, job->width, job->height,
+                job->output_texture_handle, job->output_width, job->output_height,
                 job->output_fence_handle, job->output_fence_value,
                 job->source_frame_id, job->timestamp_ns};
             const dav2_status status = dav2_submit_metal_texture_binding(
@@ -685,6 +677,19 @@ ibrh_result IBRH_CALL model_get_port(
     return IBRH_OK;
 }
 
+bool processing_shape(const ibrh_model* model, const ibrh_resource& input,
+    const std::string& parameters, uint32_t& width, uint32_t& height) {
+    uint32_t size = model->input_size;
+    if (!input_size(parameters, size, size)) return false;
+    dav2_image_shape shape{};
+    const auto status = input.domain == IBRH_RESOURCE_DOMAIN_HOST ? dav2_get_inferbridge_shape(input.width, input.height, size, &shape) :
+        dav2_get_network_shape(input.width, input.height, size, &shape);
+    if (status != DAV2_STATUS_OK) return false;
+    width = static_cast<uint32_t>(shape.width);
+    height = static_cast<uint32_t>(shape.height);
+    return true;
+}
+
 ibrh_result IBRH_CALL model_plan_outputs(
     const ibrh_model* model, size_t n, const ibrh_output_plan_request* request,
     uint32_t capacity, ibrh_port_descriptor* outputs) {
@@ -696,8 +701,8 @@ ibrh_result IBRH_CALL model_plan_outputs(
         return IBRH_ERROR_INVALID_ARGUMENT;
     auto result = model_get_port(model, IBRH_PORT_OUTPUT, 0u, sizeof(outputs[0]), &outputs[0]);
     if (result != IBRH_OK) return result;
-    outputs[0].width = request->inputs[0].width;
-    outputs[0].height = request->inputs[0].height;
+    if (!processing_shape(model, request->inputs[0], copy_string(request->parameters_json),
+            outputs[0].width, outputs[0].height)) return IBRH_ERROR_INVALID_ARGUMENT;
     outputs[0].flags = 0u; return IBRH_OK;
 }
 
@@ -722,6 +727,9 @@ ibrh_result IBRH_CALL submit(
         return IBRH_ERROR_STRUCT_TOO_SMALL;
     const auto& input = input_binding.resource;
     const auto& output_resource = output_binding.resource;
+    uint32_t depth_width = 0u, depth_height = 0u;
+    if (!processing_shape(model, input, copy_string(request->parameters_json),
+            depth_width, depth_height)) return IBRH_ERROR_INVALID_ARGUMENT;
     uint32_t size = model->input_size;
     if (!input_size(copy_string(request->parameters_json), size, size))
         return fail(
@@ -754,8 +762,8 @@ ibrh_result IBRH_CALL submit(
         const bool common_output =
             output_resource.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
             output_resource.pixel_format == depth_format &&
-            output_resource.width == input.width &&
-            output_resource.height == input.height &&
+            output_resource.width == depth_width &&
+            output_resource.height == depth_height &&
             output_resource.native_handle != 0u;
         const bool valid_d3d12 = d3d12_texture &&
             wait.kind == IBRH_SYNC_D3D12_FENCE &&
@@ -845,6 +853,8 @@ ibrh_result IBRH_CALL submit(
         job->timestamp_ns = request->timestamp_ns;
         job->width = input.width;
         job->height = input.height;
+        job->output_width = depth_width;
+        job->output_height = depth_height;
         job->metric = model->metric;
         job->state = IBRH_JOB_QUEUED;
         job->gpu_state.store(IBRH_JOB_QUEUED);
@@ -893,10 +903,10 @@ ibrh_result IBRH_CALL submit(
         output_resource.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
         output_resource.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
         output_resource.pixel_format != host_depth_format ||
-        output_resource.width != input.width ||
-        output_resource.height != input.height ||
+        output_resource.width != depth_width ||
+        output_resource.height != depth_height ||
         output_resource.row_stride_bytes <
-            input.width * sizeof(float) ||
+            depth_width * sizeof(float) ||
         !output_resource.native_handle)
         return fail(
             model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
@@ -957,36 +967,10 @@ ibrh_result IBRH_CALL submit(
             return;
         }
         if (job->state.load() == IBRH_JOB_CANCELLED) return;
-        for (uint32_t y = 0; y < input_height; ++y) {
-            auto* row = reinterpret_cast<float*>(output_target +
-                static_cast<size_t>(y) * output_stride);
-            const float source_y = (static_cast<float>(y) + 0.5f) *
-                job->height / input_height - 0.5f;
-            const int y0 = std::clamp(static_cast<int>(std::floor(source_y)),
-                0, static_cast<int>(job->height) - 1);
-            const int y1 = std::min(y0 + 1, static_cast<int>(job->height) - 1);
-            const float wy = std::clamp(
-                source_y - std::floor(source_y), 0.0f, 1.0f);
-            for (uint32_t x = 0; x < input_width; ++x) {
-                const float source_x = (static_cast<float>(x) + 0.5f) *
-                    job->width / input_width - 0.5f;
-                const int x0 = std::clamp(static_cast<int>(std::floor(source_x)),
-                    0, static_cast<int>(job->width) - 1);
-                const int x1 = std::min(
-                    x0 + 1, static_cast<int>(job->width) - 1);
-                const float wx = std::clamp(
-                    source_x - std::floor(source_x), 0.0f, 1.0f);
-                const float top =
-                    job->depth[static_cast<size_t>(y0) * job->width + x0] *
-                        (1.0f - wx) +
-                    job->depth[static_cast<size_t>(y0) * job->width + x1] * wx;
-                const float bottom =
-                    job->depth[static_cast<size_t>(y1) * job->width + x0] *
-                        (1.0f - wx) +
-                    job->depth[static_cast<size_t>(y1) * job->width + x1] * wx;
-                row[x] = top * (1.0f - wy) + bottom * wy;
-            }
-        }
+        for (uint32_t y = 0; y < job->height; ++y)
+            std::memcpy(output_target + static_cast<size_t>(y) * output_stride,
+                job->depth.data() + static_cast<size_t>(y) * job->width,
+                static_cast<size_t>(job->width) * sizeof(float));
         if (job->state.load() != IBRH_JOB_CANCELLED)
             job->state.store(IBRH_JOB_COMPLETE);
     });
@@ -1009,6 +993,10 @@ ibrh_result IBRH_CALL job_poll(
 #if defined(DAV2_INFERBRIDGE_NATIVE_GPU_TEXTURES)
     if (job->gpu_admission && gpu_job == nullptr) {
         status->state = job->gpu_state.load();
+        if (status->state == IBRH_JOB_FAILED) {
+            std::lock_guard<std::mutex> lock(job->gpu_mutex);
+            return fail(nullptr, IBRH_ERROR_INTERNAL, job->gpu_error);
+        }
     } else
 #endif
     if (gpu_job != nullptr) {
