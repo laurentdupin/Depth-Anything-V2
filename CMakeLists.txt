@@ -29,30 +29,34 @@ option(DAV2_BUILD_TOOLS "Build native command-line tools" ON)
 
 if(DAV2_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
+    inferbridge_prepare_vulkan_shaders(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/shared_shaders.cmake"
+        INFERBRIDGE_MODEL_SHADER_DIR)
 
     set(DAV2_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(MAKE_DIRECTORY "${DAV2_GENERATED_DIR}")
 
     function(dav2_compile_shader NAME)
-        set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${NAME}.glsl")
+        set(SOURCE "${INFERBRIDGE_MODEL_SHADER_DIR}/${NAME}.glsl")
         set(SPIRV "${DAV2_GENERATED_DIR}/${NAME}.spv")
         set(HEADER "${DAV2_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
             OUTPUT "${SPIRV}"
             COMMAND Vulkan::glslc -O -fshader-stage=compute
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+                "-I${INFERBRIDGE_MODEL_SHADER_DIR}"
                 -o "${SPIRV}" "${SOURCE}"
             DEPENDS
-                "${SOURCE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_tiled_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_vec4_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_coop_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/project_tokens_common.glsl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv_transpose_nonoverlap_common.glsl"
+                "${SOURCE}" ${INFERBRIDGE_MODEL_SHADER_DEPENDENCIES}
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/indexing.h"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/conv2d_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/conv2d_tiled_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/linear_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/linear_vec4_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/linear_coop_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/project_tokens_common.glsl"
+                "${INFERBRIDGE_MODEL_SHADER_DIR}/conv_transpose_nonoverlap_common.glsl"
             VERBATIM
         )
         add_custom_command(
