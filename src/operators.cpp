@@ -1013,33 +1013,7 @@ void VulkanOperators::linear_residual_wide(
             : divide_up(divide_up(rows, 7), 8));
 }
 
-void VulkanOperators::layer_norm(
-    VulkanBuffer& output,
-    const VulkanBuffer& input,
-    const VulkanBuffer& weight,
-    const VulkanBuffer& bias,
-    std::uint32_t rows,
-    std::uint32_t columns,
-    float epsilon) {
-    if (rows == 0 || columns == 0 || epsilon <= 0.0f) {
-        throw std::invalid_argument("invalid layer norm parameters");
-    }
-    require_bytes(input, std::uint64_t(rows) * columns, "input");
-    require_bytes(output, std::uint64_t(rows) * columns, "output");
-    require_bytes(weight, columns, "weight");
-    require_bytes(bias, columns, "bias");
-    struct Parameters {
-        std::uint32_t rows;
-        std::uint32_t columns;
-        float epsilon;
-    } parameters{rows, columns, epsilon};
-    context_.dispatch(
-        layer_norm_,
-        {&output, &input, &weight, &bias},
-        &parameters,
-        sizeof(parameters),
-        rows);
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_layer_norm_variant_1.h>
 
 void VulkanOperators::layer_norm_fp16(
     VulkanBuffer& half_output,
@@ -1069,31 +1043,7 @@ void VulkanOperators::layer_norm_fp16(
         &parameters, sizeof(parameters), rows);
 }
 
-void VulkanOperators::add_scaled(
-    VulkanBuffer& output,
-    const VulkanBuffer& residual,
-    const VulkanBuffer& addend,
-    const VulkanBuffer& scale,
-    std::uint32_t count,
-    std::uint32_t columns) {
-    if (count == 0 || columns == 0 || count % columns != 0) {
-        throw std::invalid_argument("invalid add-scaled dimensions");
-    }
-    require_bytes(output, count, "output");
-    require_bytes(residual, count, "residual");
-    require_bytes(addend, count, "addend");
-    require_bytes(scale, columns, "scale");
-    struct Parameters {
-        std::uint32_t count;
-        std::uint32_t columns;
-    } parameters{count, columns};
-    context_.dispatch(
-        add_scaled_,
-        {&output, &addend, &scale, &residual},
-        &parameters,
-        sizeof(parameters),
-        divide_up(count, 256));
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_add_scaled.h>
 
 void VulkanOperators::attention_head64(
     VulkanBuffer& output,
@@ -1405,50 +1355,7 @@ void VulkanOperators::prepare_tokens(
         divide_up(add_parameters.count, 256));
 }
 
-void VulkanOperators::project_tokens(
-    VulkanBuffer& output,
-    const VulkanBuffer& tokens,
-    const VulkanBuffer& weight,
-    const VulkanBuffer& bias,
-    std::uint32_t width,
-    std::uint32_t height,
-    std::uint32_t embedding,
-    std::uint32_t output_channels,
-    bool half_weight) {
-    if (width == 0 || height == 0 || embedding == 0 ||
-        output_channels == 0) {
-        throw std::invalid_argument("invalid token projection dimensions");
-    }
-    require_bytes(
-        tokens,
-        (std::uint64_t(width) * height + 1) * embedding,
-        "tokens");
-    const std::uint64_t weight_elements =
-        std::uint64_t(output_channels) * embedding;
-    if (half_weight) {
-        require_half_elements(weight, weight_elements, "weight");
-    } else {
-        require_bytes(weight, weight_elements, "weight");
-    }
-    require_bytes(bias, output_channels, "bias");
-    require_bytes(
-        output,
-        std::uint64_t(width) * height * output_channels,
-        "output");
-    struct Parameters {
-        std::uint32_t width;
-        std::uint32_t height;
-        std::uint32_t embedding;
-        std::uint32_t output_channels;
-    } parameters{width, height, embedding, output_channels};
-    context_.dispatch(
-        half_weight ? project_tokens_half_ : project_tokens_,
-        {&output, &tokens, &weight, &bias},
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_channels, 32),
-        divide_up(width * height, 32));
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_project_tokens_variant_3.h>
 
 void VulkanOperators::project_tokens_fp16(
     VulkanBuffer& output,
@@ -1804,60 +1711,7 @@ void VulkanOperators::conv2d_int8(
         bias, rows, inner, output_channels, 0u, rows, true, has_bias);
 }
 
-void VulkanOperators::conv_transpose_nonoverlap(
-    VulkanBuffer& output,
-    const VulkanBuffer& input,
-    const VulkanBuffer& weight,
-    const VulkanBuffer& bias,
-    std::uint32_t input_width,
-    std::uint32_t input_height,
-    std::uint32_t input_channels,
-    std::uint32_t output_channels,
-    std::uint32_t kernel,
-    bool half_weight) {
-    if (input_width == 0 || input_height == 0 || input_channels == 0 ||
-        output_channels == 0 || kernel == 0) {
-        throw std::invalid_argument("invalid transposed convolution dimensions");
-    }
-    const std::uint32_t output_width = input_width * kernel;
-    const std::uint32_t output_height = input_height * kernel;
-    require_bytes(
-        input,
-        std::uint64_t(input_width) * input_height * input_channels,
-        "transposed convolution input");
-    const std::uint64_t weight_elements =
-        std::uint64_t(input_channels) * output_channels * kernel * kernel;
-    if (half_weight) {
-        require_half_elements(
-            weight, weight_elements, "transposed convolution weight");
-    } else {
-        require_bytes(
-            weight, weight_elements, "transposed convolution weight");
-    }
-    require_bytes(bias, output_channels, "transposed convolution bias");
-    require_bytes(
-        output,
-        std::uint64_t(output_width) * output_height * output_channels,
-        "transposed convolution output");
-    struct Parameters {
-        std::uint32_t input_width;
-        std::uint32_t input_height;
-        std::uint32_t input_channels;
-        std::uint32_t output_channels;
-        std::uint32_t kernel;
-    } parameters{
-        input_width, input_height, input_channels, output_channels, kernel};
-    context_.dispatch(
-        half_weight
-            ? conv_transpose_nonoverlap_half_
-            : conv_transpose_nonoverlap_,
-        {&output, &input, &weight, &bias},
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        output_channels);
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_conv_transpose_nonoverlap_variant_3.h>
 
 void VulkanOperators::conv_transpose_nonoverlap_fp16(
     VulkanBuffer& output,
@@ -1975,77 +1829,9 @@ void VulkanOperators::conv_transpose_nonoverlap_int8(
         divide_up(input_height * kernel, 8), output_channels);
 }
 
-void VulkanOperators::bilinear_align_true(
-    VulkanBuffer& output,
-    const VulkanBuffer& input,
-    std::uint32_t input_width,
-    std::uint32_t input_height,
-    std::uint32_t output_width,
-    std::uint32_t output_height,
-    std::uint32_t channels) {
-    if (input_width == 0 || input_height == 0 || output_width == 0 ||
-        output_height == 0 || channels == 0) {
-        throw std::invalid_argument("invalid bilinear dimensions");
-    }
-    require_bytes(
-        input, std::uint64_t(input_width) * input_height * channels,
-        "bilinear input");
-    require_bytes(
-        output, std::uint64_t(output_width) * output_height * channels,
-        "bilinear output");
-    struct Parameters {
-        std::uint32_t input_width;
-        std::uint32_t input_height;
-        std::uint32_t output_width;
-        std::uint32_t output_height;
-        std::uint32_t channels;
-    } parameters{
-        input_width, input_height, output_width, output_height, channels};
-    context_.dispatch(
-        bilinear_align_true_,
-        {&output, &input},
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8),
-        channels);
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_bilinear_align_true_variant_2.h>
 
-void VulkanOperators::bilinear_align_true_image(
-    VulkanImage& output,
-    const VulkanBuffer& input,
-    std::uint32_t input_width,
-    std::uint32_t input_height,
-    std::uint32_t output_width,
-    std::uint32_t output_height) {
-    if (input_width == 0 || input_height == 0 ||
-        output_width == 0 || output_height == 0 ||
-        output.width() != output_width ||
-        output.height() != output_height ||
-        output.format() != VK_FORMAT_R32_SFLOAT) {
-        throw std::invalid_argument(
-            "invalid bilinear image dimensions or format");
-    }
-    require_bytes(
-        input,
-        std::uint64_t(input_width) * input_height,
-        "bilinear image input");
-    struct Parameters {
-        std::uint32_t input_width;
-        std::uint32_t input_height;
-        std::uint32_t output_width;
-        std::uint32_t output_height;
-    } parameters{
-        input_width, input_height, output_width, output_height};
-    context_.dispatch_buffer_to_image(
-        bilinear_align_true_image_,
-        input,
-        output,
-        &parameters,
-        sizeof(parameters),
-        divide_up(output_width, 8),
-        divide_up(output_height, 8));
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_bilinear_align_true_image.h>
 
 void VulkanOperators::reduce_minmax(
     const VulkanBuffer& input,
@@ -2089,16 +1875,7 @@ void VulkanOperators::normalize_metric(
         &parameters, sizeof(parameters), divide_up(count, 256));
 }
 
-void VulkanOperators::relu(
-    VulkanBuffer& output,
-    const VulkanBuffer& input,
-    std::uint32_t count) {
-    require_bytes(output, count, "ReLU output");
-    require_bytes(input, count, "ReLU input");
-    context_.dispatch(
-        relu_, {&output, &input}, &count, sizeof(count),
-        divide_up(count, 256));
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_relu.h>
 
 void VulkanOperators::sigmoid_scale(
     VulkanBuffer& output,
@@ -2116,17 +1893,6 @@ void VulkanOperators::sigmoid_scale(
         &parameters, sizeof(parameters), divide_up(count, 256));
 }
 
-void VulkanOperators::add(
-    VulkanBuffer& output,
-    const VulkanBuffer& left,
-    const VulkanBuffer& right,
-    std::uint32_t count) {
-    require_bytes(output, count, "add output");
-    require_bytes(left, count, "add left");
-    require_bytes(right, count, "add right");
-    context_.dispatch(
-        add_, {&output, &left, &right}, &count, sizeof(count),
-        divide_up(count, 256));
-}
+#include <inferbridge/vulkan/operators/vulkan_operators_add.h>
 
 }  // namespace dav2
