@@ -544,7 +544,7 @@ public:
               track_resource_hazards(encoder)),
           precision_(execution_precision(context_, flags)),
           weights_(model_, context_, precision_),
-          operators_(context_),
+          operators_(context_, precision_ == inferbridge::native::Precision::int8),
           preprocessor_(context_),
           encoder_(
               encoder, context_, weights_, operators_,

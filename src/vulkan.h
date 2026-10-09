@@ -48,6 +48,7 @@ struct VulkanProfileRange {
 };
 
 struct VulkanComputeCapabilities {
+    bool subgroup_arithmetic = false;
     // True only when 16-bit storage and native float16 shader arithmetic are
     // both available and enabled on the logical device.
     bool fp16 = false;
@@ -309,6 +310,7 @@ private:
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    std::uint32_t required_cooperative_subgroup_size_ = 0;
     VkPhysicalDeviceMemoryProperties memory_properties_{};
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;

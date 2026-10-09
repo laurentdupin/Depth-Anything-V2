@@ -159,6 +159,9 @@ VulkanContext::VulkanContext(
     vkGetPhysicalDeviceProperties2(physical_device_, &base_properties);
     const VkPhysicalDeviceProperties& properties = base_properties.properties;
     device_name_ = properties.deviceName;
+    compute_capabilities_.subgroup_arithmetic =
+        (subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+        (subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
     VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
     };
@@ -195,7 +198,7 @@ VulkanContext::VulkanContext(
         has_cooperative_matrix2
             ? static_cast<void*>(&memory_model_features)
             : has_cooperative_matrix
-            ? static_cast<void*>(&cooperative_features)
+            ? static_cast<void*>(&memory_model_features)
             : static_cast<void*>(&storage16_features),
     };
     vkGetPhysicalDeviceFeatures2(physical_device_, &device_features);
@@ -215,9 +218,12 @@ VulkanContext::VulkanContext(
         integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
         integer_dot_properties
             .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
+    const auto subgroup_policy = inferbridge::native_harness::query_compute_subgroup_policy(physical_device_);
     if (has_cooperative_matrix &&
         cooperative_features.cooperativeMatrix == VK_TRUE &&
-        subgroup_properties.subgroupSize == 32 &&
+        memory_model_features.vulkanMemoryModel == VK_TRUE &&
+        memory_model_features.vulkanMemoryModelDeviceScope == VK_TRUE &&
+        (subgroup_properties.subgroupSize == 32 || subgroup_policy.required_size_32) &&
         (subgroup_properties.supportedStages &
          VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
         compute_capabilities_.fp16) {
@@ -621,7 +627,9 @@ VulkanContext::VulkanContext(
     };
     VkPhysicalDeviceVulkanMemoryModelFeatures enabled_memory_model{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
-        &enabled_cooperative2,
+        compute_capabilities_.cooperative_matrix_workgroup_nv
+            ? static_cast<void*>(&enabled_cooperative2)
+            : static_cast<void*>(&enabled_cooperative),
         VK_TRUE,
         VK_TRUE,
         VK_FALSE,
@@ -630,15 +638,24 @@ VulkanContext::VulkanContext(
         ? (compute_capabilities_.cooperative_matrix_workgroup_nv
             ? static_cast<const void*>(&enabled_memory_model)
             : compute_capabilities_.cooperative_matrix_fp16
-            ? static_cast<const void*>(&enabled_cooperative)
+            ? static_cast<const void*>(&enabled_memory_model)
             : static_cast<const void*>(&enabled_storage16))
         : (compute_capabilities_.packed_int8_dot ||
            compute_capabilities_.cooperative_matrix_workgroup_int8_nv)
         ? static_cast<const void*>(&enabled_storage8)
         : nullptr;
+    VkPhysicalDeviceSubgroupSizeControlFeatures enabled_subgroup_control{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+        const_cast<void*>(enabled_feature_chain),
+        VK_TRUE,
+        VK_FALSE,
+    };
+    const bool require_subgroup_control = compute_capabilities_.cooperative_matrix_fp16 &&
+        subgroup_properties.subgroupSize != 32 && subgroup_policy.required_size_32;
+    required_cooperative_subgroup_size_ = require_subgroup_control ? 32u : 0u;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        enabled_feature_chain,
+        require_subgroup_control ? &enabled_subgroup_control : enabled_feature_chain,
         0,
         1,
         &queue_info,
@@ -651,6 +668,9 @@ VulkanContext::VulkanContext(
     check(
         inferbridge::native_harness::create_inference_vulkan_device(physical_device_, &device_info, nullptr, &device_),
         "vkCreateDevice");
+    std::fprintf(stderr, "InferBridge Vulkan compute: fp16=%u cooperative_matrix=%u subgroup=%u required_cooperative_subgroup=%u\n",
+        compute_capabilities_.fp16 ? 1u : 0u, compute_capabilities_.cooperative_matrix_fp16 ? 1u : 0u,
+        subgroup_properties.subgroupSize, require_subgroup_control ? 32u : 0u);
 #if defined(_WIN32)
     get_memory_win32_handle_properties_ =
         reinterpret_cast<

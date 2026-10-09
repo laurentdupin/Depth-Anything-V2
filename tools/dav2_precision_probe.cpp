@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -44,10 +45,10 @@ int nonnegative(const char* value, const char* name) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 8) {
+    if (argc != 8 && argc != 10 && argc != 11) {
         std::cerr << "usage: " << argv[0]
                   << " MODEL {vits|vitb|vitl} {fp32|fp16|int8}"
-                     " DEVICE WIDTH HEIGHT RUNS\n";
+                     " DEVICE WIDTH HEIGHT RUNS [WARMUP OUTPUT_F32 [INPUT_F32]]\n";
         return 2;
     }
     try {
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
         const int width = positive(argv[5], "width");
         const int height = positive(argv[6], "height");
         const int runs = positive(argv[7], "runs");
+        const int warmup = argc >= 10 ? nonnegative(argv[8], "warmup") : 0;
         if (width % 14 != 0 || height % 14 != 0)
             throw std::invalid_argument("width and height must be multiples of 14");
         dav2_create_options options{
@@ -70,10 +72,16 @@ int main(int argc, char** argv) {
         std::vector<float> input(pixels * 3);
         for (std::size_t index = 0; index < input.size(); ++index)
             input[index] = std::sin(static_cast<float>(index) * 0.001f);
+        if(argc==11) {
+            std::ifstream file(argv[10],std::ios::binary);
+            file.read(reinterpret_cast<char*>(input.data()),static_cast<std::streamsize>(input.size()*sizeof(float)));
+            if(!file || file.peek()!=std::ifstream::traits_type::eof())
+                throw std::runtime_error("invalid normalized input tensor file");
+        }
         std::vector<float> output(pixels);
         std::vector<double> milliseconds;
         milliseconds.reserve(static_cast<std::size_t>(runs));
-        for (int run = 0; run < runs; ++run) {
+        for (int run = -warmup; run < runs; ++run) {
             const auto start = std::chrono::steady_clock::now();
             const dav2_status status = dav2_infer_tensor_f32(
                 context, input.data(), width, height,
@@ -83,10 +91,16 @@ int main(int argc, char** argv) {
                 dav2_destroy(context);
                 throw std::runtime_error(inference_error);
             }
-            milliseconds.push_back(std::chrono::duration<double, std::milli>(
+            if (run >= 0) milliseconds.push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - start).count());
         }
         dav2_destroy(context);
+        if (argc >= 10) {
+            std::ofstream file(argv[9], std::ios::binary);
+            file.write(reinterpret_cast<const char*>(output.data()),
+                static_cast<std::streamsize>(output.size() * sizeof(float)));
+            if (!file) throw std::runtime_error("failed to write depth output");
+        }
         if (!std::all_of(output.begin(), output.end(), [](float value) {
                 return std::isfinite(value);
             }))

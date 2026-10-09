@@ -37,6 +37,10 @@
 #include "conv_transpose_int8_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
+#include "layer_norm_subgroup_spv.h"
+#include "softmax_subgroup_spv.h"
+#include "conv2d_implicit_coop_fp16_spv.h"
+#include "layer_norm_subgroup_fp16_spv.h"
 #include "layer_norm_fp16_spv.h"
 #include "linear_spv.h"
 #include "linear16_spv.h"
@@ -57,7 +61,6 @@
 #include "linear_vec16_fp16_spv.h"
 #include "linear_vec16_fp16_output_gelu_spv.h"
 #include "linear_coop_fp16_spv.h"
-#include "linear_coop_tall_fp16_spv.h"
 #include "linear_coop_fp16_output_gelu_spv.h"
 #include "linear_coop_workgroup_nv_fp16_spv.h"
 #include "linear_coop_workgroup_nv_fp16_output_gelu_spv.h"
@@ -116,8 +119,10 @@ void require_half_elements(
 
 }  // namespace
 
-VulkanOperators::VulkanOperators(VulkanContext& context)
+VulkanOperators::VulkanOperators(VulkanContext& context, bool preserve_quantized_order)
     : context_(context),
+      preserve_quantized_order_(preserve_quantized_order),
+      subgroup_reductions_(!preserve_quantized_order && context.compute_capabilities().subgroup_arithmetic),
       linear_(context.create_pipeline(
           dav2_linear_spv, dav2_linear_spv_size, 4, 12)),
       linear16_(context.create_pipeline(
@@ -187,7 +192,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       gelu_(context.create_pipeline(
           dav2_gelu_spv, dav2_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
-          dav2_layer_norm_spv, dav2_layer_norm_spv_size, 4, 12)),
+          subgroup_reductions_ ? dav2_layer_norm_subgroup_spv : dav2_layer_norm_spv,
+          subgroup_reductions_ ? dav2_layer_norm_subgroup_spv_size : dav2_layer_norm_spv_size, 4, 12)),
       add_scaled_(context.create_pipeline(
           dav2_add_scaled_spv, dav2_add_scaled_spv_size, 4, 8)),
       bmm_(context.create_pipeline(
@@ -203,8 +209,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           3,
           8)),
       softmax_lastdim_(context.create_pipeline(
-          dav2_softmax_lastdim_spv,
-          dav2_softmax_lastdim_spv_size,
+          subgroup_reductions_ ? dav2_softmax_subgroup_spv : dav2_softmax_lastdim_spv,
+          subgroup_reductions_ ? dav2_softmax_subgroup_spv_size : dav2_softmax_lastdim_spv_size,
           2,
           8)),
       softmax_lastdim_half_(context.create_pipeline(
@@ -352,13 +358,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
             dav2_linear_vec16_fp16_output_gelu_spv,
             dav2_linear_vec16_fp16_output_gelu_spv_size, 4, 12);
         layer_norm_fp16_ = context_.create_pipeline(
-            dav2_layer_norm_fp16_spv,
-            dav2_layer_norm_fp16_spv_size, 4, 12);
+            subgroup_reductions_ ? dav2_layer_norm_subgroup_fp16_spv : dav2_layer_norm_fp16_spv,
+            subgroup_reductions_ ? dav2_layer_norm_subgroup_fp16_spv_size : dav2_layer_norm_fp16_spv_size, 4, 12);
         pack_fp16_.set_debug_name("pack_fp16");
         linear_vec16_fp16_.set_debug_name("linear_vec16_fp16");
         linear_vec16_fp16_output_gelu_.set_debug_name(
             "linear_vec16_fp16_output_gelu");
-        layer_norm_fp16_.set_debug_name("layer_norm_fp16");
+        layer_norm_fp16_.set_debug_name(subgroup_reductions_ ? "layer_norm_subgroup_fp16" : "layer_norm_fp16");
         if (context_.compute_capabilities().cooperative_matrix_fp16) {
             linear_coop_fp16_output_gelu_ = context_.create_pipeline(
                 dav2_linear_coop_fp16_output_gelu_spv,
@@ -414,6 +420,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
             "conv_transpose_nonoverlap_fp16");
     }
     if (context_.compute_capabilities().cooperative_matrix_fp16) {
+        conv2d_implicit_coop_fp16_ = context_.create_pipeline(
+            dav2_conv2d_implicit_coop_fp16_spv,dav2_conv2d_implicit_coop_fp16_spv_size,4,40);
+        conv2d_implicit_coop_fp16_.set_debug_name("conv2d_implicit_coop_fp16");
         bmm_score_coop_fp16_ = context_.create_pipeline(
             dav2_bmm_score_coop_fp16_spv,
             dav2_bmm_score_coop_fp16_spv_size, 2, 8);
@@ -422,10 +431,6 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
             dav2_linear_coop_fp16_spv,
             dav2_linear_coop_fp16_spv_size, 4, 12);
         linear_coop_fp16_.set_debug_name("linear_coop_fp16");
-        linear_coop_tall_fp16_ = context_.create_pipeline(
-            dav2_linear_coop_tall_fp16_spv,
-            dav2_linear_coop_tall_fp16_spv_size, 4, 12);
-        linear_coop_tall_fp16_.set_debug_name("linear_coop_tall_fp16");
     }
     if (context_.compute_capabilities().cooperative_matrix_workgroup_nv) {
         conv2d_pointwise_coop_workgroup_nv_fp16_ = context_.create_pipeline(
@@ -488,12 +493,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_vec16_half_residual_.set_debug_name(
         "linear_vec16_half_residual");
     gelu_.set_debug_name("gelu");
-    layer_norm_.set_debug_name("layer_norm");
+    layer_norm_.set_debug_name(subgroup_reductions_ ? "layer_norm_subgroup" : "layer_norm");
     add_scaled_.set_debug_name("add_scaled");
     bmm_.set_debug_name("bmm");
     bmm_score_half_.set_debug_name("bmm_score_half");
     bmm_value_half_.set_debug_name("bmm_value_half");
-    softmax_lastdim_.set_debug_name("softmax_lastdim");
+    softmax_lastdim_.set_debug_name(subgroup_reductions_ ? "softmax_subgroup" : "softmax_lastdim");
     softmax_lastdim_half_.set_debug_name(
         "softmax_lastdim_half");
     prepare_tokens_.set_debug_name("prepare_tokens");
@@ -658,8 +663,8 @@ void VulkanOperators::linear_fp16_half_output_gelu(
             : linear_vec16_fp16_output_gelu_,
         {&half_output, &packed_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, workgroup_nv ? 32 : cooperative ? 16 : 64),
-        divide_up(rows, workgroup_nv ? 32 : cooperative ? 16 : 64));
+        divide_up(output_columns, workgroup_nv || cooperative ? 32 : 64),
+        divide_up(rows, workgroup_nv ? 32 : 64));
 }
 
 void VulkanOperators::linear_fp16_half_input(
@@ -697,10 +702,7 @@ void VulkanOperators::linear_fp16_half_input(
     const bool workgroup_nv =
         rows >= 128 &&
         context_.compute_capabilities().cooperative_matrix_workgroup_nv;
-    // Sharing each weight tile across four subgroups wins once there are
-    // enough rows to amortize the larger workgroup. Small token grids retain
-    // the higher-occupancy one-subgroup cooperative tile.
-    const bool tall = cooperative && rows >= 256;
+    // The KHR kernel shares its 64x32 tile across four subgroups.
     if (workgroup_nv) {
         context_.dispatch(
             weight_transposed
@@ -712,12 +714,11 @@ void VulkanOperators::linear_fp16_half_input(
         return;
     }
     context_.dispatch(
-        tall ? linear_coop_tall_fp16_
-            : cooperative ? linear_coop_fp16_ : linear_vec16_fp16_,
+        cooperative ? linear_coop_fp16_ : linear_vec16_fp16_,
         {&output, &half_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, cooperative ? 16 : 64),
-        divide_up(rows, tall ? 64 : cooperative ? 16 : 64));
+        divide_up(output_columns, cooperative ? 32 : 64),
+        divide_up(rows, 64));
 }
 
 void VulkanOperators::linear_fp16_half_input_output_gelu(
@@ -763,8 +764,8 @@ void VulkanOperators::linear_fp16_half_input_output_gelu(
             : linear_vec16_fp16_output_gelu_,
         {&half_output, &half_input, &half_weight, &bias},
         &parameters, sizeof(parameters),
-        divide_up(output_columns, workgroup_nv ? 32 : cooperative ? 16 : 64),
-        divide_up(rows, workgroup_nv ? 32 : cooperative ? 16 : 64));
+        divide_up(output_columns, workgroup_nv || cooperative ? 32 : 64),
+        divide_up(rows, workgroup_nv ? 32 : 64));
 }
 
 void VulkanOperators::linear_int8(
@@ -1085,15 +1086,15 @@ void VulkanOperators::attention_head64(
             std::uint32_t heads;
         } parameters{tokens, heads};
         const bool cooperative =
-            context_.compute_capabilities().cooperative_matrix_fp16;
+            context_.compute_capabilities().cooperative_matrix_fp16 && !preserve_quantized_order_;
         context_.dispatch(
             cooperative ? bmm_score_coop_fp16_ : bmm_score_fp16_,
             {&scores, &qkv},
             &parameters,
             sizeof(parameters),
-            cooperative ? divide_up(tokens, 16)
+            cooperative ? divide_up(tokens, 32)
                 : divide_up(divide_up(tokens, 4), 8),
-            cooperative ? divide_up(tokens, 16)
+            cooperative ? divide_up(tokens, 64)
                 : divide_up(divide_up(tokens, 8), 8),
             heads);
         struct SoftmaxParameters {
@@ -1448,7 +1449,8 @@ void VulkanOperators::conv2d(
     bool block8,
     bool half_weight,
     bool tiled,
-    bool allow_stride2_tiled) {
+    bool allow_stride2_tiled,
+    bool cooperative) {
     if (input_width == 0 || input_height == 0 || input_channels == 0 ||
         output_channels == 0 || kernel == 0 || stride == 0 ||
         input_width + 2 * padding < kernel ||
@@ -1544,6 +1546,16 @@ void VulkanOperators::conv2d(
             {&output, &packed_input, &weight, &bias},
             &matrix_parameters, sizeof(matrix_parameters),
             divide_up(output_channels, 32), divide_up(rows, 32));
+        return;
+    }
+    if (cooperative && half_weight && specialized_weight &&
+        context_.compute_capabilities().cooperative_matrix_fp16 &&
+        kernel == 3 && stride == 1 && padding == 1 && input_channels % 4 == 0 &&
+        output_channels >= 32 && std::uint64_t(output_width) * output_height >= 64) {
+        context_.dispatch(
+            conv2d_implicit_coop_fp16_, {&output, &input, &weight, &bias},
+            &parameters, sizeof(parameters), divide_up(output_channels, 32),
+            divide_up(output_width * output_height, 64));
         return;
     }
     VulkanPipeline& pipeline =

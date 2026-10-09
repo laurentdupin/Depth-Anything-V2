@@ -10,7 +10,7 @@ namespace dav2 {
 
 class VulkanOperators {
 public:
-    explicit VulkanOperators(VulkanContext& context);
+    explicit VulkanOperators(VulkanContext& context, bool preserve_quantized_order = false);
 
     void linear(
         VulkanBuffer& output,
@@ -108,6 +108,7 @@ public:
         std::uint32_t columns,
         float epsilon);
 
+
     void add_scaled(
         VulkanBuffer& output,
         const VulkanBuffer& residual,
@@ -186,7 +187,8 @@ public:
         bool block8 = false,
         bool half_weight = false,
         bool tiled = false,
-        bool stride2_tiled = true);
+        bool stride2_tiled = true,
+        bool cooperative = false);
     void conv2d_fp16(
         VulkanBuffer& output,
         const VulkanBuffer& input,
@@ -301,6 +303,8 @@ private:
         bool output_transposed,
         bool has_bias);
     VulkanContext& context_;
+    bool preserve_quantized_order_ = false;
+    bool subgroup_reductions_ = false;
     inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
     inferbridge::native::ReusableDeviceBuffer<VulkanBuffer> fp16_workspace_;
     VulkanPipeline linear_;
@@ -322,7 +326,6 @@ private:
     VulkanPipeline linear_vec16_fp16_;
     VulkanPipeline linear_vec16_fp16_output_gelu_;
     VulkanPipeline linear_coop_fp16_;
-    VulkanPipeline linear_coop_tall_fp16_;
     VulkanPipeline linear_coop_fp16_output_gelu_;
     VulkanPipeline linear_coop_workgroup_nv_fp16_;
     VulkanPipeline linear_coop_workgroup_nv_fp16_output_gelu_;
@@ -341,6 +344,7 @@ private:
     VulkanPipeline bmm_score_fp16_;
     VulkanPipeline bmm_value_fp16_;
     VulkanPipeline bmm_score_coop_fp16_;
+    VulkanPipeline conv2d_implicit_coop_fp16_;
     VulkanPipeline softmax_lastdim_;
     VulkanPipeline softmax_lastdim_half_;
     VulkanPipeline prepare_tokens_;

@@ -1,5 +1,13 @@
 # Identical shader sources provided by the InferBridge native harness SDK.
 set(INFERBRIDGE_SHARED_SHADER_MAP
+    "subgroup_reduction_common.glsl|subgroup_reduction_common.glsl"
+    "softmax_subgroup_common.glsl|softmax_subgroup_common.glsl"
+    "coop_gemm64x32_common.glsl|coop_gemm64x32_common.glsl"
+    "conv2d_implicit_coop_fp16.glsl|conv2d_implicit_coop_fp16.glsl"
+    "attention_coop_online_fp16.glsl|attention_coop_online_fp16.glsl"
+    "layer_norm_subgroup_common.glsl|layer_norm_subgroup_common.glsl"
+    "bmm_score_coop_fp16.glsl|bmm_score_coop_tiled_fp16.glsl"
+    "linear_coop_common.glsl|linear_coop_tiled_common.glsl"
     "add.glsl|add_variant_2.glsl"
     "add_position.glsl|add_position_variant_2.glsl"
     "add_scaled.glsl|add_scaled.glsl"

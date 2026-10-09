@@ -216,7 +216,7 @@ void DptHead::select_convolution_block(
     const VulkanBuffer& refinement_bias = weight(
         weights_,
         "depth_head.scratch.refinenet1.resConfUnit2.conv1.bias");
-    const auto run_convolution_mix = [&](bool block8, bool tiled) {
+    const auto run_convolution_mix = [&](bool block8, bool tiled, bool cooperative = false) {
         const auto start = std::chrono::steady_clock::now();
         context_.batch([&] {
             // Approximate the complete DPT 3x3 mix. The refinement units
@@ -249,7 +249,7 @@ void DptHead::select_convolution_block(
                         true,
                         block8,
                         convolution_half_weight_,
-                        tiled);
+                        tiled, true, cooperative);
                 }
             }
             operators_.conv2d(
@@ -269,7 +269,7 @@ void DptHead::select_convolution_block(
                 true,
                 block8,
                 convolution_half_weight_,
-                tiled);
+                tiled, true, cooperative);
         });
         return std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - start).count();
@@ -277,28 +277,33 @@ void DptHead::select_convolution_block(
     struct ConvolutionCandidate {
         bool block8;
         bool tiled;
+        bool cooperative;
         std::array<double, 3> samples{};
     };
-    std::array<ConvolutionCandidate, 4> convolution_candidates{{
-        {false, false, {}},
-        {true, false, {}},
-        {false, true, {}},
-        {true, true, {}},
-    }};
+    std::vector<ConvolutionCandidate> convolution_candidates{
+        {false, false, false, {}},
+        {true, false, false, {}},
+        {false, true, false, {}},
+        {true, true, false, {}},
+    };
+    if (precision_ == inferbridge::native::Precision::fp16 &&
+        convolution_half_weight_ && context_.compute_capabilities().cooperative_matrix_fp16) {
+        convolution_candidates.push_back({false, false, true, {}});
+    }
     for (const ConvolutionCandidate& candidate : convolution_candidates)
-        run_convolution_mix(candidate.block8, candidate.tiled);
+        run_convolution_mix(candidate.block8, candidate.tiled, candidate.cooperative);
     for (std::size_t sample = 0;
          sample < convolution_candidates[0].samples.size(); ++sample) {
         if ((sample & 1u) == 0) {
             for (ConvolutionCandidate& candidate : convolution_candidates) {
                 candidate.samples[sample] = run_convolution_mix(
-                    candidate.block8, candidate.tiled);
+                    candidate.block8, candidate.tiled, candidate.cooperative);
             }
         } else {
             for (auto candidate = convolution_candidates.rbegin();
                  candidate != convolution_candidates.rend(); ++candidate) {
                 candidate->samples[sample] = run_convolution_mix(
-                    candidate->block8, candidate->tiled);
+                    candidate->block8, candidate->tiled, candidate->cooperative);
             }
         }
     }
@@ -307,13 +312,15 @@ void DptHead::select_convolution_block(
     for (ConvolutionCandidate& candidate : convolution_candidates) {
         std::sort(candidate.samples.begin(), candidate.samples.end());
         const double median = candidate.samples[1];
-        if (best_convolution == nullptr || median < best_convolution_time) {
+        const double required_improvement = candidate.cooperative ? 0.9 : 1.0;
+        if (best_convolution == nullptr || median < best_convolution_time * required_improvement) {
             best_convolution = &candidate;
             best_convolution_time = median;
         }
     }
     convolution_block8_ = best_convolution->block8;
     convolution_tiled_ = best_convolution->tiled;
+    convolution_cooperative_fp16_ = best_convolution->cooperative;
     if (refinement_precision_ == inferbridge::native::Precision::fp16) {
         const auto run_native_mix = [&] {
             const auto start = std::chrono::steady_clock::now();
@@ -344,20 +351,20 @@ void DptHead::select_convolution_block(
         };
         std::array<double, 3> selected_mix_samples{};
         std::array<double, 3> native_mix_samples{};
-        run_convolution_mix(convolution_block8_, convolution_tiled_);
+        run_convolution_mix(convolution_block8_, convolution_tiled_, convolution_cooperative_fp16_);
         run_native_mix();
         for (std::size_t sample = 0;
              sample < selected_mix_samples.size(); ++sample) {
             if ((sample & 1u) == 0) {
                 selected_mix_samples[sample] =
                     run_convolution_mix(
-                        convolution_block8_, convolution_tiled_);
+                        convolution_block8_, convolution_tiled_, convolution_cooperative_fp16_);
                 native_mix_samples[sample] = run_native_mix();
             } else {
                 native_mix_samples[sample] = run_native_mix();
                 selected_mix_samples[sample] =
                     run_convolution_mix(
-                        convolution_block8_, convolution_tiled_);
+                        convolution_block8_, convolution_tiled_, convolution_cooperative_fp16_);
             }
         }
         std::sort(
@@ -465,6 +472,10 @@ void DptHead::select_convolution_block(
         precision_, convolution_half_weight_
             ? inferbridge::native::Precision::fp16
             : inferbridge::native::Precision::fp32);
+    std::fprintf(stderr,
+        "DAV2 convolution selection: cooperative=%u native_fp16=%u tiled=%u\n",
+        convolution_cooperative_fp16_ && !convolution_native_fp16_ ? 1u : 0u,
+        convolution_native_fp16_ ? 1u : 0u, convolution_tiled_ ? 1u : 0u);
     convolution_block_selected_ = true;
 }
 
@@ -516,7 +527,7 @@ FeatureMap DptHead::conv(
                 bias, input.width, input.height, input.channels,
                 output_channels, kernel, stride, padding, has_bias,
                 convolution_block8_, true, convolution_tiled_,
-                stride2_tiled_);
+                stride2_tiled_, convolution_cooperative_fp16_);
         }
     } else if (operation_precision == inferbridge::native::Precision::int8) {
         operators_.conv2d_int8(
